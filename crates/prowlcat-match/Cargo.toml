@@ -1,0 +1,16 @@
+[package]
+name = "prowlcat-match"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+prowlcat-types = { path = "../prowlcat-types" }
+aho-corasick.workspace = true
+regex.workspace = true
+ipnet.workspace = true
+memchr.workspace = true
+bstr.workspace = true

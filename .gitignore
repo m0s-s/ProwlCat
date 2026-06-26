@@ -1,0 +1,49 @@
+# Rust
+/target/
+
+# Local index and cache
+*.idx/
+.prowlcat/
+
+# Build artifacts
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets and local credentials — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials*
+secrets*
+*_secrets.*
+config.local.*
+
+# Scan output (often contains sensitive breach data)
+results.json
+results.csv
+results.ndjson
+*.jsonl
+output/
+
+# Local test corpora (may contain real breach data)
+/data/
+/corpus/
+/breaches/
+
+# Backup
+*.bak
+*.tmp

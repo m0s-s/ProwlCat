@@ -1,0 +1,4 @@
+user@example.com
+acme.example
+10.23.1.5
+10.0.0.0/8

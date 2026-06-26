@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/prowlcat-types",
+    "crates/prowlcat-cli",
+    "crates/prowlcat-core",
+    "crates/prowlcat-source",
+    "crates/prowlcat-decode",
+    "crates/prowlcat-match",
+    "crates/prowlcat-output",
+]
+# prowlcat-index added in M4 when tantivy integration lands
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/ProwlCat/ProwlCat"
+authors = ["ProwlCat Contributors"]
+description = "Local-first high-performance breach corpus search"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+rayon = "1"
+walkdir = "2"
+glob = "0.3"
+memchr = "2"
+bstr = "1"
+aho-corasick = "1"
+regex = "1"
+ipnet = { version = "2", features = ["serde"] }
+flate2 = "1"
+csv = "1"
+indicatif = "0.17"
+crossbeam-channel = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
