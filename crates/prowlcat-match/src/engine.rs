@@ -3,7 +3,9 @@ use anyhow::Result;
 
 use prowlcat_types::{ExtractedValue, MatchKind, Query, QueryKind};
 
-use crate::cidr::{match_cidr_line, match_domain_in_line};
+use memchr::memmem::Finder;
+
+use crate::cidr::{match_cidr_line, match_domain_in_line, match_ip_in_network, required_literal};
 
 #[derive(Debug, Clone)]
 pub struct LineHit {
@@ -19,6 +21,8 @@ pub struct MatchEngine {
     /// Maps Aho-Corasick pattern id → query index
     pattern_to_query: Vec<usize>,
     include_subdomains: bool,
+    /// Per query: literal an IP must contain to be inside that CIDR (cheap line prefilter).
+    cidr_prefilters: Vec<Option<Finder<'static>>>,
 }
 
 impl MatchEngine {
@@ -36,8 +40,19 @@ impl MatchEngine {
             .ascii_case_insensitive(true)
             .build(&patterns)?;
 
+        let cidr_prefilters = queries
+            .iter()
+            .map(|q| {
+                q.network
+                    .as_ref()
+                    .and_then(required_literal)
+                    .map(|lit| Finder::new(lit.as_bytes()).into_owned())
+            })
+            .collect();
+
         Ok(Self {
             queries: queries.to_vec(),
+            cidr_prefilters,
             ac,
             pattern_to_query,
             include_subdomains,
@@ -77,17 +92,19 @@ impl MatchEngine {
                     continue;
                 }
                 if let Some(net) = &q.network {
-                    if let Some((kind, span, extracted)) =
-                        match_cidr_line(&text, net, &q.normalized)
-                    {
-                        if kind == MatchKind::IpInNetwork {
-                            hits.push(LineHit {
-                                query_index: qi,
-                                match_kind: kind,
-                                span,
-                                extracted,
-                            });
+                    if let Some(f) = &self.cidr_prefilters[qi] {
+                        if f.find(line).is_none() {
+                            continue;
                         }
+                    }
+                    // The literal-CIDR case was already reported via Aho-Corasick above.
+                    if let Some((kind, span, extracted)) = match_ip_in_network(&text, net) {
+                        hits.push(LineHit {
+                            query_index: qi,
+                            match_kind: kind,
+                            span,
+                            extracted,
+                        });
                     }
                 }
             }
