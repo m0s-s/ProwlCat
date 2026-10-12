@@ -1,0 +1,20 @@
+[package]
+name = "prowlcat-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tantivy = "0.26"
+prowlcat-types = { path = "../prowlcat-types" }
+prowlcat-source = { path = "../prowlcat-source" }
+prowlcat-decode = { path = "../prowlcat-decode" }
+prowlcat-match = { path = "../prowlcat-match" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -35,7 +35,7 @@ struct Cli {
 enum Commands {
     /// Search breach files for emails, domains, IPs, CIDR ranges, or plain text
     Search(SearchArgs),
-    /// Build a search index (planned — M4)
+    /// Build a Tantivy index of a corpus for fast repeated searches
     Index(IndexArgs),
     /// Show corpus statistics without searching
     Stats(StatsArgs),
@@ -52,8 +52,12 @@ struct SearchArgs {
     targets_file: Option<PathBuf>,
 
     /// Files, directories, or globs to scan
-    #[arg(short = 'p', long = "path", required = true)]
+    #[arg(short = 'p', long = "path", required_unless_present = "index")]
     paths: Vec<PathBuf>,
+
+    /// Search a prebuilt index (see `prowlcat index`) instead of scanning files; text/--loose targets are unsupported
+    #[arg(long, conflicts_with = "paths")]
+    index: Option<PathBuf>,
 
     /// Recurse into subdirectories
     #[arg(short = 'r', long, default_value_t = true)]
@@ -98,11 +102,29 @@ struct SearchArgs {
 
 #[derive(Parser)]
 struct IndexArgs {
+    /// Files, directories, or globs to index
     #[arg(short = 'p', long = "path", required = true)]
     paths: Vec<PathBuf>,
 
+    /// Directory to create the index in (must not exist or be empty)
     #[arg(short = 'o', long, required = true)]
     output: PathBuf,
+
+    /// Recurse into subdirectories
+    #[arg(short = 'r', long, default_value_t = true)]
+    recursive: bool,
+
+    /// Parallel worker threads
+    #[arg(short = 'j', long)]
+    threads: Option<usize>,
+
+    /// Password for encrypted zip archives (repeatable)
+    #[arg(long = "password")]
+    passwords: Vec<String>,
+
+    /// File with one candidate archive password per line
+    #[arg(long)]
+    password_file: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -130,10 +152,7 @@ fn run() -> Result<ExitCode> {
 
     match cli.command {
         Commands::Search(args) => run_search(args),
-        Commands::Index(_) => {
-            eprintln!("ProwlCat index is not implemented yet (see ARCHITECTURE.md M4)");
-            Ok(ExitCode::from(2))
-        }
+        Commands::Index(args) => run_index(args),
         Commands::Stats(args) => commands::stats::run(args.paths, args.recursive),
     }
 }
@@ -171,18 +190,7 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
         .parse_many(raw_targets)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let mut passwords = args.passwords;
-    if let Some(file) = &args.password_file {
-        let content = std::fs::read_to_string(file)
-            .with_context(|| format!("read password file {}", file.display()))?;
-        passwords.extend(
-            content
-                .lines()
-                .map(|l| l.trim_end_matches(char::from(13)))
-                .filter(|l| !l.is_empty())
-                .map(str::to_string),
-        );
-    }
+    let passwords = load_passwords(args.passwords, args.password_file.as_deref())?;
 
     let mut config = ScanConfig {
         passwords,
@@ -201,10 +209,15 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     config.progress = progress.clone();
 
     let start = Instant::now();
-    let orchestrator = ScanOrchestrator::new(config, queries);
-    let (mut results, mut summary) = match &progress {
-        Some(handle) => run_with_progress(&orchestrator, handle)?,
-        None => orchestrator.run()?,
+    let (mut results, mut summary) = if let Some(dir) = &args.index {
+        let searcher = prowlcat_index::IndexSearcher::open(dir)?;
+        searcher.search(&queries, config.include_subdomains, config.max_matches_per_query)?
+    } else {
+        let orchestrator = ScanOrchestrator::new(config, queries);
+        match &progress {
+            Some(handle) => run_with_progress(&orchestrator, handle)?,
+            None => orchestrator.run()?,
+        }
     };
     summary.elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -233,6 +246,44 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+fn load_passwords(mut passwords: Vec<String>, file: Option<&std::path::Path>) -> Result<Vec<String>> {
+    if let Some(file) = file {
+        let content = std::fs::read_to_string(file)
+            .with_context(|| format!("read password file {}", file.display()))?;
+        passwords.extend(
+            content
+                .lines()
+                .map(|l| l.trim_end_matches(char::from(13)))
+                .filter(|l| !l.is_empty())
+                .map(str::to_string),
+        );
+    }
+    Ok(passwords)
+}
+
+fn run_index(args: IndexArgs) -> Result<ExitCode> {
+    let defaults = ScanConfig::default();
+    let cfg = prowlcat_index::IndexBuildConfig {
+        paths: args.paths,
+        recursive: args.recursive,
+        threads: args.threads.unwrap_or(defaults.threads),
+        mmap_threshold_mb: defaults.mmap_threshold_mb,
+        passwords: load_passwords(args.passwords, args.password_file.as_deref())?,
+    };
+    let start = Instant::now();
+    let meta = prowlcat_index::build_index(&cfg, &args.output)?;
+    eprintln!(
+        "indexed {} lines from {} files ({} bytes) into {} in {:.1}s ({} files failed)",
+        meta.docs,
+        meta.files,
+        meta.bytes,
+        args.output.display(),
+        start.elapsed().as_secs_f64(),
+        meta.errors,
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Run the scan while a ticker thread renders a byte-based progress bar on stderr.
@@ -286,7 +337,7 @@ fn init_tracing(verbose: u8, quiet: bool) {
         "info"
     };
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level)))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(format!("{level},tantivy=warn"))))
         .with_target(false)
         .try_init();
 }

@@ -40,7 +40,7 @@ Reference: [ripgrep](https://github.com/BurntSushi/ripgrep) demonstrates Rust st
 | `regex` / `ipnet` | IP extraction and CIDR |
 | `flate2` / `zstd` / `tar` / `zip` | compressed streams and archives |
 | `serde` / `csv` | export formats |
-| `tantivy` (M4) | optional index |
+| `tantivy` | optional index |
 
 ---
 
@@ -137,7 +137,12 @@ Corpus statistics without running a search.
 
 ### `prowlcat index`
 
-Planned (M4) — not yet implemented.
+```bash
+prowlcat index -p ./corpus -o ./corpus.idx      # [-r] [-j N] [--password … | --password-file …]
+prowlcat search bob@example.com --index ./corpus.idx
+```
+
+The output directory must not exist or be empty. See §9.
 
 ---
 
@@ -201,7 +206,11 @@ Auto-detect via extension, falling back to magic bytes (gzip `1f 8b`, zstd `28 b
 
 ## 9. Optional index (M4)
 
-Tantivy-based index for repeated queries on the same corpus. Build with `prowlcat index`, query with `--index`.
+Tantivy-based index (`crates/prowlcat-index`) for repeated queries on the same corpus. Build with `prowlcat index`, query with `search --index <dir>` (replaces `-p`).
+
+- **What is indexed:** only lines containing an email, dotted domain or IP. Each such line is stored verbatim with its path, archive entry, line number and byte offset. Tokens are lowercased; every parent-domain suffix of a host is indexed, and IPs go in a Tantivy IP field so CIDR queries are range queries.
+- **How a search runs:** the index nominates candidate lines, then the normal `MatchEngine` re-checks them. Spans, match kinds and extracted values are therefore identical to a full scan of the indexed lines.
+- **Limits:** plain-text / `--loose` targets are rejected (term indexes cannot do substring search). Matches that are not token-bounded (e.g. an IP glued to letters) can be found by a scan but not by the index. The index copies the matching lines, so its size scales with the number of such lines. It is a snapshot: rebuild it after the corpus changes.
 
 ---
 
@@ -213,7 +222,7 @@ Tantivy-based index for repeated queries on the same corpus. Build with `prowlca
 | M1 | gzip, parallelism, JSON/CSV export |
 | M2 | zstd, tar.gz, zip, mmap — **done** |
 | M3 | progress bar, benchmarks — **done** (`cargo bench -p prowlcat-core`) |
-| M4 | Tantivy index |
+| M4 | Tantivy index — **done** (`prowlcat index`, `search --index`) |
 | M5 | release binaries, docs |
 
 ---

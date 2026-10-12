@@ -8,8 +8,8 @@ members = [
     "crates/prowlcat-decode",
     "crates/prowlcat-match",
     "crates/prowlcat-output",
+    "crates/prowlcat-index",
 ]
-# prowlcat-index added in M4 when tantivy integration lands
 
 [workspace.package]
 version = "0.1.0"
