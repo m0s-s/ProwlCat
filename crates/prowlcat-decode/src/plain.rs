@@ -1,5 +1,7 @@
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use memmap2::Mmap;
@@ -34,6 +36,38 @@ pub(crate) fn read_lines<R: Read>(reader: R, mut f: impl FnMut(u64, u64, &[u8]))
     Ok(())
 }
 
+/// Reader wrapper that counts raw (on-disk) bytes consumed, for progress reporting.
+pub(crate) struct Counted<R> {
+    inner: R,
+    global: Option<Arc<AtomicU64>>,
+    local: Arc<AtomicU64>,
+    /// File size; reads beyond it (zip re-reads, seeks) are not reported, so progress never overshoots.
+    limit: u64,
+}
+
+impl<R> Counted<R> {
+    pub(crate) fn new(inner: R, global: Option<Arc<AtomicU64>>, local: Arc<AtomicU64>, limit: u64) -> Self {
+        Self { inner, global, local, limit }
+    }
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let prev = self.local.fetch_add(n as u64, Ordering::Relaxed);
+        if let Some(g) = &self.global {
+            g.fetch_add(self.limit.saturating_sub(prev).min(n as u64), Ordering::Relaxed);
+        }
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Counted<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
 enum Source {
     Stream(Box<dyn Read>),
     Mapped(Mmap),
@@ -49,6 +83,17 @@ impl PlainReader {
     /// Open a plaintext file; files at or above `mmap_threshold` bytes are memory-mapped
     /// (a threshold of 0 disables mmap).
     pub fn open(path: &Path, mmap_threshold: u64) -> Result<Self> {
+        Self::open_counting(path, mmap_threshold, None, Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Like [`open`](Self::open), additionally counting raw bytes read into `global`/`local`.
+    /// Memory-mapped files are not counted here; the caller tops up from the file size.
+    pub(crate) fn open_counting(
+        path: &Path,
+        mmap_threshold: u64,
+        global: Option<Arc<AtomicU64>>,
+        local: Arc<AtomicU64>,
+    ) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
         if mmap_threshold > 0 && len >= mmap_threshold && len > 0 {
@@ -58,7 +103,10 @@ impl PlainReader {
                 return Ok(Self { source: Some(Source::Mapped(map)), path: path.to_path_buf() });
             }
         }
-        Ok(Self { source: Some(Source::Stream(Box::new(file))), path: path.to_path_buf() })
+        Ok(Self {
+            source: Some(Source::Stream(Box::new(Counted::new(file, global, local, len)))),
+            path: path.to_path_buf(),
+        })
     }
 
     pub fn from_reader<R: Read + 'static>(reader: R, path: PathBuf, _start_offset: u64) -> Result<Self> {

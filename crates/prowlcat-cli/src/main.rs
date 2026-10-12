@@ -1,14 +1,16 @@
 mod commands;
 
 use std::path::PathBuf;
+use std::io::IsTerminal;
 use std::process::ExitCode;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use prowlcat_core::{ScanConfig, ScanOrchestrator, TargetParser, TypeHint};
+use prowlcat_core::{ProgressHandle, ScanConfig, ScanOrchestrator, TargetParser, TypeHint};
 use prowlcat_output::{infer_format, print_results, write_output, OutputFormat};
 
 #[derive(Parser)]
@@ -193,9 +195,17 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
         config.threads = t;
     }
 
+    // Progress bar only on an interactive stderr, so piped/exported output stays clean.
+    let show_progress = !args.no_progress && std::io::stderr().is_terminal();
+    let progress = show_progress.then(ProgressHandle::default);
+    config.progress = progress.clone();
+
     let start = Instant::now();
     let orchestrator = ScanOrchestrator::new(config, queries);
-    let (mut results, mut summary) = orchestrator.run()?;
+    let (mut results, mut summary) = match &progress {
+        Some(handle) => run_with_progress(&orchestrator, handle)?,
+        None => orchestrator.run()?,
+    };
     summary.elapsed_ms = start.elapsed().as_millis() as u64;
 
     // Stable sort for readable output
@@ -223,6 +233,48 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+/// Run the scan while a ticker thread renders a byte-based progress bar on stderr.
+fn run_with_progress(
+    orchestrator: &ScanOrchestrator,
+    handle: &ProgressHandle,
+) -> Result<(Vec<prowlcat_core::ScanResult>, prowlcat_core::ScanSummary)> {
+    use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+    let bar = ProgressBar::with_draw_target(Some(0), ProgressDrawTarget::stderr_with_hz(10));
+    bar.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.cyan} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({binary_bytes_per_sec}, eta {eta}) {msg}",
+        )
+        .expect("valid progress template")
+        .progress_chars("=> "),
+    );
+    bar.set_message("enumerating...");
+
+    let finished = AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !finished.load(Ordering::Relaxed) {
+                let total = handle.total.load(Ordering::Relaxed);
+                if total > 0 {
+                    bar.set_length(total);
+                    bar.set_message(format!(
+                        "{} files, {} matches",
+                        handle.files_done.load(Ordering::Relaxed),
+                        handle.matches.load(Ordering::Relaxed)
+                    ));
+                }
+                bar.set_position(handle.done.load(Ordering::Relaxed));
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let result = orchestrator.run();
+        finished.store(true, Ordering::Relaxed);
+        result
+    });
+    bar.finish_and_clear();
+    result
 }
 
 fn init_tracing(verbose: u8, quiet: bool) {

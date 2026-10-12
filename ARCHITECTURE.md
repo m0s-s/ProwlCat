@@ -143,10 +143,16 @@ Planned (M4) — not yet implemented.
 
 ## 6. Scan strategy for large files
 
-1. **No line-count pre-scan** — progress uses byte offset vs file size.
+1. **No line-count pre-scan** — progress counts raw on-disk bytes consumed (compressed bytes for `.gz`/`.zst`/archives) against total file size, shown as a bar with throughput and ETA on an interactive stderr. Disabled by `--no-progress` or when stderr is not a terminal.
 2. **8 MiB reusable buffer** for plaintext; mmap at or above `mmap_threshold_mb` (M2).
 3. **One Rayon task per file**; sequential scan inside each file.
 4. **Bounded match channel** for streaming NDJSON export.
+
+---
+
+### Benchmarks
+
+`cargo bench -p prowlcat-core` runs criterion benchmarks over a synthetic corpus (default 32 MiB, override with `PROWLCAT_BENCH_MB`). Groups: `scan` (plain stream vs mmap, gzip, zstd, email/CIDR/text matchers, 1000-target Aho-Corasick) and `parallel` (1/2/4/8 threads over 8 shard files). Throughput is reported against uncompressed size.
 
 ---
 
@@ -182,6 +188,8 @@ Auto-detect via extension, falling back to magic bytes (gzip `1f 8b`, zstd `28 b
 - No type inference or word-boundary rules
 - Example: `prowlcat search Winter2024 --loose -p ./breaches`
 
+**Performance notes:** IPv4 extraction is a hand-written digit scanner (no regex), IPv6 is only scanned for IPv6 networks, and IPv4 networks with at least one fixed octet (e.g. `10.0.0.0/8` -> `10.`) first reject lines lacking that literal via `memmem`. Together this made CIDR scans roughly 3-4x faster on the synthetic benchmark.
+
 ### Auto-detection order
 
 1. Valid CIDR → `Cidr`
@@ -204,7 +212,7 @@ Tantivy-based index for repeated queries on the same corpus. Build with `prowlca
 | M0 | CLI, plaintext, email/domain/ip/cidr/text |
 | M1 | gzip, parallelism, JSON/CSV export |
 | M2 | zstd, tar.gz, zip, mmap — **done** |
-| M3 | progress bar, benchmarks |
+| M3 | progress bar, benchmarks — **done** (`cargo bench -p prowlcat-core`) |
 | M4 | Tantivy index |
 | M5 | release binaries, docs |
 

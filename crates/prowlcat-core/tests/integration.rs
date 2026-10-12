@@ -225,3 +225,62 @@ fn encrypted_zip_needs_correct_password() {
     assert_eq!(scan_with(p.clone(), &["wrong"]), 0, "wrong password");
     assert_eq!(scan_with(p, &["wrong", "s3cret"]), 2, "password list");
 }
+
+// ---- M3: progress ----
+
+#[test]
+fn progress_reaches_total_for_every_format() {
+    use prowlcat_core::ProgressHandle;
+    use std::sync::atomic::Ordering;
+
+    let dir = scratch_dir("progress");
+    let plain = dir.join("a.txt");
+    std::fs::write(&plain, SAMPLE.repeat(100)).unwrap();
+    let gz = dir.join("b.txt.gz");
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(SAMPLE.repeat(100).as_bytes()).unwrap();
+    std::fs::write(&gz, enc.finish().unwrap()).unwrap();
+    std::fs::write(dir.join("c.txt.zst"), zstd::encode_all(SAMPLE.as_bytes(), 0).unwrap()).unwrap();
+    std::fs::write(dir.join("d.tar"), tar_bytes()).unwrap();
+    let zp = dir.join("e.zip");
+    let mut w = zip::ZipWriter::new(std::fs::File::create(&zp).unwrap());
+    w.start_file("x.txt", zip::write::SimpleFileOptions::default()).unwrap();
+    w.write_all(SAMPLE.as_bytes()).unwrap();
+    w.finish().unwrap();
+
+    for mmap_mb in [0u64, 1] {
+        // mmap_mb is whole MiB so 1 does not map these small files; the decode-level
+        // mmap top-up is covered separately below.
+        let handle = ProgressHandle::default();
+        let queries = TargetParser::new(TypeHint::Email).parse_many(["alice@example.com"]).unwrap();
+        let config = ScanConfig {
+            paths: vec![dir.clone()],
+            threads: 2,
+            mmap_threshold_mb: mmap_mb,
+            progress: Some(handle.clone()),
+            ..ScanConfig::default()
+        };
+        ScanOrchestrator::new(config, queries).run().unwrap();
+        let total = handle.total.load(Ordering::Relaxed);
+        assert!(total > 0);
+        assert_eq!(handle.done.load(Ordering::Relaxed), total, "done must equal total");
+        assert_eq!(handle.files_done.load(Ordering::Relaxed), 5);
+    }
+}
+
+#[test]
+fn progress_tops_up_for_mmap() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let dir = scratch_dir("progress-mmap");
+    let p = dir.join("big.txt");
+    std::fs::write(&p, SAMPLE.repeat(10)).unwrap();
+    let size = std::fs::metadata(&p).unwrap().len();
+    let counter = Arc::new(AtomicU64::new(0));
+    let mut reader = prowlcat_decode::LineReader::open(&p, prowlcat_source::CompressionKind::None, 1)
+        .unwrap()
+        .with_progress(counter.clone());
+    reader.for_each_line(|_, _, _, _| {}).unwrap();
+    assert_eq!(counter.load(Ordering::Relaxed), size);
+}

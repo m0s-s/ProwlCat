@@ -4,7 +4,7 @@ pub mod config;
 pub mod query;
 pub mod scan;
 
-pub use config::ScanConfig;
+pub use config::{ProgressHandle, ScanConfig};
 pub use prowlcat_types::{
     ExtractedValue, MatchKind, Query, QueryKind, ScanResult, ScanSummary, SourceLocation,
 };

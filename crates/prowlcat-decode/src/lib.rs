@@ -4,6 +4,8 @@ mod plain;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use flate2::read::GzDecoder;
@@ -11,7 +13,7 @@ use prowlcat_source::CompressionKind;
 use tracing::warn;
 
 pub use plain::PlainReader;
-use plain::read_lines;
+use plain::{read_lines, Counted};
 
 /// Line reader over plaintext, compressed streams, and tar/zip archives.
 ///
@@ -21,17 +23,29 @@ use plain::read_lines;
 pub struct LineReader {
     path: PathBuf,
     compression: CompressionKind,
-    plain: Option<PlainReader>,
+    mmap_threshold: u64,
     passwords: Vec<String>,
+    progress: Option<Arc<AtomicU64>>,
 }
 
 impl LineReader {
     pub fn open(path: &Path, compression: CompressionKind, mmap_threshold: u64) -> Result<Self> {
-        let plain = match compression {
-            CompressionKind::None => Some(PlainReader::open(path, mmap_threshold)?),
-            _ => None,
-        };
-        Ok(Self { path: path.to_path_buf(), compression, plain, passwords: Vec::new() })
+        // Fail early if the file cannot be opened at all.
+        std::fs::File::open(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            compression,
+            mmap_threshold,
+            passwords: Vec::new(),
+            progress: None,
+        })
+    }
+
+    /// Report raw (on-disk) bytes consumed into `counter`. On completion the counter is
+    /// topped up to the file size, so progress reaches 100% even for mmap and zip reads.
+    pub fn with_progress(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.progress = Some(counter);
+        self
     }
 
     /// Candidate passwords tried, in order, on encrypted zip members.
@@ -41,26 +55,34 @@ impl LineReader {
     }
 
     pub fn for_each_line(&mut self, mut f: impl FnMut(Option<&str>, u64, u64, &[u8])) -> Result<()> {
-        match self.compression {
-            CompressionKind::None => match self.plain.as_mut() {
-                Some(p) => p.for_each_line(|n, o, l| f(None, n, o, l)),
-                None => Ok(()),
-            },
-            CompressionKind::Gzip => {
-                let dec = GzDecoder::new(std::fs::File::open(&self.path)?);
-                read_lines(dec, |n, o, l| f(None, n, o, l))
-            }
+        let local = Arc::new(AtomicU64::new(0));
+        let file = || -> Result<Counted<std::fs::File>> {
+            let f = std::fs::File::open(&self.path)?;
+            let len = f.metadata()?.len();
+            Ok(Counted::new(f, self.progress.clone(), local.clone(), len))
+        };
+        let result = match self.compression {
+            CompressionKind::None => PlainReader::open_counting(
+                &self.path,
+                self.mmap_threshold,
+                self.progress.clone(),
+                local.clone(),
+            )
+            .and_then(|mut p| p.for_each_line(|n, o, l| f(None, n, o, l))),
+            CompressionKind::Gzip => read_lines(GzDecoder::new(file()?), |n, o, l| f(None, n, o, l)),
             CompressionKind::Zstd => {
-                let dec = zstd::stream::read::Decoder::new(std::fs::File::open(&self.path)?)?;
+                let dec = zstd::stream::read::Decoder::new(file()?)?;
                 read_lines(dec, |n, o, l| f(None, n, o, l))
             }
-            CompressionKind::Tar => scan_tar(std::fs::File::open(&self.path)?, &self.path, &mut f),
-            CompressionKind::TarGz => {
-                let dec = GzDecoder::new(std::fs::File::open(&self.path)?);
-                scan_tar(dec, &self.path, &mut f)
-            }
-            CompressionKind::Zip => scan_zip(&self.path, &self.passwords, &mut f),
+            CompressionKind::Tar => scan_tar(file()?, &self.path, &mut f),
+            CompressionKind::TarGz => scan_tar(GzDecoder::new(file()?), &self.path, &mut f),
+            CompressionKind::Zip => scan_zip(file()?, &self.path, &self.passwords, &mut f),
+        };
+        if let Some(g) = &self.progress {
+            let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+            g.fetch_add(size.saturating_sub(local.load(Ordering::Relaxed)), Ordering::Relaxed);
         }
+        result
     }
 }
 
@@ -92,12 +114,13 @@ fn scan_tar<R: Read>(
 
 /// Walk zip members. Encrypted members are opened with the first working candidate password
 /// (the last successful one is tried first); members that cannot be opened are skipped with a warning.
-fn scan_zip(
+fn scan_zip<R: Read + std::io::Seek>(
+    reader: R,
     path: &Path,
     passwords: &[String],
     f: &mut impl FnMut(Option<&str>, u64, u64, &[u8]),
 ) -> Result<()> {
-    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+    let mut archive = zip::ZipArchive::new(reader)?;
     let mut preferred: Option<usize> = None;
     for i in 0..archive.len() {
         let encrypted = match archive.by_index_raw(i) {

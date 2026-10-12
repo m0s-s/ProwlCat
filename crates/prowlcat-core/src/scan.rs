@@ -25,6 +25,10 @@ impl ScanOrchestrator {
         let entries = SourceEnumerator::new(&self.config.paths, self.config.recursive)?.collect()?;
         let engine = MatchEngine::build(&self.queries, self.config.include_subdomains)?;
 
+        if let Some(p) = &self.config.progress {
+            p.total.store(entries.iter().map(|e| e.size_bytes).sum(), Ordering::Relaxed);
+        }
+
         let bytes_scanned = Arc::new(AtomicU64::new(0));
         let errors = Arc::new(AtomicU64::new(0));
 
@@ -39,8 +43,14 @@ impl ScanOrchestrator {
             entries
                 .par_iter()
                 .flat_map(|entry| {
-                    match scan_entry(entry, &engine, mmap_threshold, max_matches, &self.config.passwords, &bytes_scanned) {
-                        Ok(matches) => matches,
+                    match scan_entry(entry, &engine, mmap_threshold, max_matches, &self.config.passwords, self.config.progress.as_ref(), &bytes_scanned) {
+                        Ok(matches) => {
+                            if let Some(p) = &self.config.progress {
+                                p.files_done.fetch_add(1, Ordering::Relaxed);
+                                p.matches.fetch_add(matches.len() as u64, Ordering::Relaxed);
+                            }
+                            matches
+                        }
                         Err(e) => {
                             warn!(path = %entry.path.display(), error = %e, "scan failed");
                             errors.fetch_add(1, Ordering::Relaxed);
@@ -70,6 +80,7 @@ fn scan_entry(
     mmap_threshold: u64,
     max_matches: u64,
     passwords: &[String],
+    progress: Option<&crate::config::ProgressHandle>,
     bytes_scanned: &Arc<AtomicU64>,
 ) -> Result<Vec<ScanResult>> {
     debug!(path = %entry.path.display(), compression = ?entry.compression, "scanning file");
@@ -78,6 +89,9 @@ fn scan_entry(
     let mut per_query: Vec<u64> = vec![0; engine.query_count()];
 
     let mut reader = LineReader::open(&entry.path, entry.compression, mmap_threshold)?.with_passwords(passwords);
+    if let Some(p) = progress {
+        reader = reader.with_progress(p.done.clone());
+    }
     reader.for_each_line(|member, line_no, offset, line: &[u8]| {
         bytes_scanned.fetch_add(line.len() as u64, Ordering::Relaxed);
         let hits = engine.match_line(line);

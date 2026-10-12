@@ -38,6 +38,7 @@ zstd = "0.13"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
 memmap2 = "0.9"
+criterion = { version = "0.5", default-features = false }
 csv = "1"
 indicatif = "0.17"
 crossbeam-channel = "0.5"

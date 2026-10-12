@@ -1,4 +1,19 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+
+/// Shared counters a UI can poll while a scan runs. Bytes are raw on-disk bytes.
+#[derive(Debug, Clone, Default)]
+pub struct ProgressHandle {
+    /// Raw bytes consumed so far.
+    pub done: Arc<AtomicU64>,
+    /// Total bytes to scan; 0 until enumeration finishes.
+    pub total: Arc<AtomicU64>,
+    /// Files fully scanned.
+    pub files_done: Arc<AtomicU64>,
+    /// Matches found so far.
+    pub matches: Arc<AtomicU64>,
+}
 
 /// Runtime configuration for a scan job.
 #[derive(Debug, Clone)]
@@ -13,6 +28,8 @@ pub struct ScanConfig {
     pub hide_secrets: bool,
     /// Candidate passwords for encrypted zip archives.
     pub passwords: Vec<String>,
+    /// Optional live progress counters.
+    pub progress: Option<ProgressHandle>,
 }
 
 impl Default for ScanConfig {
@@ -29,6 +46,7 @@ impl Default for ScanConfig {
             include_subdomains: true,
             hide_secrets: false,
             passwords: Vec::new(),
+            progress: None,
         }
     }
 }
