@@ -39,7 +39,7 @@ impl ScanOrchestrator {
             entries
                 .par_iter()
                 .flat_map(|entry| {
-                    match scan_entry(entry, &engine, mmap_threshold, max_matches, &bytes_scanned) {
+                    match scan_entry(entry, &engine, mmap_threshold, max_matches, &self.config.passwords, &bytes_scanned) {
                         Ok(matches) => matches,
                         Err(e) => {
                             warn!(path = %entry.path.display(), error = %e, "scan failed");
@@ -69,6 +69,7 @@ fn scan_entry(
     engine: &MatchEngine,
     mmap_threshold: u64,
     max_matches: u64,
+    passwords: &[String],
     bytes_scanned: &Arc<AtomicU64>,
 ) -> Result<Vec<ScanResult>> {
     debug!(path = %entry.path.display(), compression = ?entry.compression, "scanning file");
@@ -76,8 +77,8 @@ fn scan_entry(
     let mut out = Vec::new();
     let mut per_query: Vec<u64> = vec![0; engine.query_count()];
 
-    let mut reader = LineReader::open(&entry.path, entry.compression, mmap_threshold)?;
-    reader.for_each_line(|line_no, offset, line: &[u8]| {
+    let mut reader = LineReader::open(&entry.path, entry.compression, mmap_threshold)?.with_passwords(passwords);
+    reader.for_each_line(|member, line_no, offset, line: &[u8]| {
         bytes_scanned.fetch_add(line.len() as u64, Ordering::Relaxed);
         let hits = engine.match_line(line);
         for hit in hits {
@@ -92,7 +93,7 @@ fn scan_entry(
                 match_kind: hit.match_kind,
                 source: prowlcat_types::SourceLocation {
                     path: entry.path.clone(),
-                    archive_entry: entry.archive_entry.clone(),
+                    archive_entry: member.map(str::to_string).or_else(|| entry.archive_entry.clone()),
                     line_number: Some(line_no),
                     byte_offset: offset,
                 },

@@ -34,6 +34,10 @@ aho-corasick = "1"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 flate2 = "1"
+zstd = "0.13"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+memmap2 = "0.9"
 csv = "1"
 indicatif = "0.17"
 crossbeam-channel = "0.5"

@@ -38,7 +38,7 @@ Reference: [ripgrep](https://github.com/BurntSushi/ripgrep) demonstrates Rust st
 | `memmap2` / `memchr` / `bstr` | fast byte scanning |
 | `aho-corasick` | multi-target pre-filter |
 | `regex` / `ipnet` | IP extraction and CIDR |
-| `flate2` (+ future zstd/xz) | compressed streams |
+| `flate2` / `zstd` / `tar` / `zip` | compressed streams and archives |
 | `serde` / `csv` | export formats |
 | `tantivy` (M4) | optional index |
 
@@ -125,6 +125,8 @@ prowlcat search [OPTIONS] -f <FILE> -p <PATH>...
 | `-j, --threads` | Worker threads (default: CPU count) |
 | `-m, --max-matches` | Cap matches per target (0 = unlimited) |
 | `-o, --output` | Export to `.json`, `.csv`, `.ndjson` |
+| `--password` | Candidate password for encrypted zip members (repeatable; visible in process list) |
+| `--password-file` | File with one candidate password per line |
 | `--no-progress` | Hide banner |
 
 **Exit codes:** `0` = matches found, `1` = no matches, `2` = error.
@@ -142,7 +144,7 @@ Planned (M4) — not yet implemented.
 ## 6. Scan strategy for large files
 
 1. **No line-count pre-scan** — progress uses byte offset vs file size.
-2. **8 MiB reusable buffer** for plaintext; mmap above threshold (M3).
+2. **8 MiB reusable buffer** for plaintext; mmap at or above `mmap_threshold_mb` (M2).
 3. **One Rayon task per file**; sequential scan inside each file.
 4. **Bounded match channel** for streaming NDJSON export.
 
@@ -150,13 +152,14 @@ Planned (M4) — not yet implemented.
 
 ## 7. Compressed files
 
-| Format | v0.1 | Roadmap |
-|--------|------|---------|
-| `.gz` | yes (`flate2`) | — |
-| `.zst` | — | M2 |
-| `.tar.gz`, `.zip` | — | M2 |
+| Format | Status |
+|--------|--------|
+| `.gz` | yes (`flate2`) |
+| `.zst` | yes (`zstd`, M2) |
+| `.tar`, `.tar.gz`/`.tgz` | yes (`tar`, M2) — each member scanned, reported as `archive_entry` |
+| `.zip` | yes (`zip`, M2) — encrypted (ZipCrypto/AES) members opened with `--password` / `--password-file`; skipped with a warning if no candidate works |
 
-Auto-detect via extension and gzip magic bytes `0x1f 0x8b`. No decompression to disk.
+Auto-detect via extension, falling back to magic bytes (gzip `1f 8b`, zstd `28 b5 2f fd`, zip `50 4b 03 04`). No decompression to disk.
 
 ---
 
@@ -200,7 +203,7 @@ Tantivy-based index for repeated queries on the same corpus. Build with `prowlca
 |-----------|-------|
 | M0 | CLI, plaintext, email/domain/ip/cidr/text |
 | M1 | gzip, parallelism, JSON/CSV export |
-| M2 | zstd, tar.gz, zip, mmap |
+| M2 | zstd, tar.gz, zip, mmap — **done** |
 | M3 | progress bar, benchmarks |
 | M4 | Tantivy index |
 | M5 | release binaries, docs |
@@ -210,6 +213,6 @@ Tantivy-based index for repeated queries on the same corpus. Build with `prowlca
 ## 11. Known limitations (v1)
 
 - No custom regex queries
-- Password-protected archives not supported
+- Password-protected archives: encrypted zip only (you supply candidates; no cracking). Encrypted 7z/rar unsupported
 - UTF-8 primary encoding; Latin-1 best-effort fallback
 - Not a replacement for SQL/analytics databases

@@ -16,3 +16,9 @@ prowlcat-source = { path = "../prowlcat-source" }
 prowlcat-decode = { path = "../prowlcat-decode" }
 prowlcat-match = { path = "../prowlcat-match" }
 ipnet = { workspace = true }
+
+[dev-dependencies]
+flate2.workspace = true
+zstd.workspace = true
+tar.workspace = true
+zip.workspace = true

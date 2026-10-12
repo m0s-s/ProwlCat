@@ -11,6 +11,8 @@ pub struct ScanConfig {
     pub context_bytes: usize,
     pub include_subdomains: bool,
     pub hide_secrets: bool,
+    /// Candidate passwords for encrypted zip archives.
+    pub passwords: Vec<String>,
 }
 
 impl Default for ScanConfig {
@@ -26,6 +28,7 @@ impl Default for ScanConfig {
             context_bytes: 0,
             include_subdomains: true,
             hide_secrets: false,
+            passwords: Vec::new(),
         }
     }
 }

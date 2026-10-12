@@ -81,6 +81,14 @@ struct SearchArgs {
     #[arg(long)]
     format: Option<String>,
 
+    /// Password for encrypted zip archives (repeatable; visible in process list, prefer --password-file)
+    #[arg(long = "password")]
+    passwords: Vec<String>,
+
+    /// File with one candidate archive password per line
+    #[arg(long)]
+    password_file: Option<PathBuf>,
+
     /// Disable progress output
     #[arg(long)]
     no_progress: bool,
@@ -161,7 +169,21 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
         .parse_many(raw_targets)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let mut passwords = args.passwords;
+    if let Some(file) = &args.password_file {
+        let content = std::fs::read_to_string(file)
+            .with_context(|| format!("read password file {}", file.display()))?;
+        passwords.extend(
+            content
+                .lines()
+                .map(|l| l.trim_end_matches(char::from(13)))
+                .filter(|l| !l.is_empty())
+                .map(str::to_string),
+        );
+    }
+
     let mut config = ScanConfig {
+        passwords,
         paths: args.paths,
         recursive: args.recursive,
         max_matches_per_query: args.max_matches,

@@ -7,7 +7,7 @@ High-performance, **local-first** breach corpus search engine written in Rust. S
 - Email, domain, IP, and CIDR search (with intelligent subnet matching)
 - Plain-text substring search (`--loose` / `-t text`)
 - Streaming I/O with parallel per-file workers (Rayon)
-- Auto-detection of `.gz` compressed files
+- Auto-detection of `.gz`, `.zst`, `.tar`, `.tar.gz` and `.zip` files
 - Terminal, JSON, NDJSON, and CSV output
 
 ## Quick start
