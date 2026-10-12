@@ -106,10 +106,8 @@ impl TargetParser {
 }
 
 fn infer_kind(s: &str) -> QueryKind {
-    if s.contains('/') {
-        if IpNet::from_str(s).is_ok() {
-            return QueryKind::Cidr;
-        }
+    if s.contains('/') && IpNet::from_str(s).is_ok() {
+        return QueryKind::Cidr;
     }
     if IpAddr::from_str(s).is_ok() {
         return QueryKind::Ip;

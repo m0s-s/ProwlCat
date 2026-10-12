@@ -127,7 +127,7 @@ impl MatchEngine {
                 })
             }
             QueryKind::Domain => {
-                let (start, end) = match_domain_in_line(&text, &q.normalized, self.include_subdomains)?;
+                let (start, end) = match_domain_in_line(text, &q.normalized, self.include_subdomains)?;
                 Some(LineHit {
                     query_index: qi,
                     match_kind: MatchKind::Exact,

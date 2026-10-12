@@ -223,7 +223,7 @@ Tantivy-based index (`crates/prowlcat-index`) for repeated queries on the same c
 | M2 | zstd, tar.gz, zip, mmap — **done** |
 | M3 | progress bar, benchmarks — **done** (`cargo bench -p prowlcat-core`) |
 | M4 | Tantivy index — **done** (`prowlcat index`, `search --index`) |
-| M5 | release binaries, docs |
+| M5 | release binaries, docs — **done** (`.github/workflows`, README, CHANGELOG) |
 
 ---
 

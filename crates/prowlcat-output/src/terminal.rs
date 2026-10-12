@@ -19,7 +19,7 @@ pub fn print_results(results: &[ScanResult], summary: &ScanSummary) {
         let kind_label = kind_str(r.kind);
         let match_label = match_kind_suffix(r.match_kind, &r.extracted);
         println!("[{}] {}{}", kind_label, r.query, match_label);
-        let loc = format_location(&r);
+        let loc = format_location(r);
         println!("  └─ {}", loc);
         println!("     {}", truncate_line(&r.line_text, 200));
         println!();

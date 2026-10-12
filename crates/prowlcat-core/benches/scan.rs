@@ -18,9 +18,9 @@ fn build_corpus(target_bytes: usize) -> Vec<u8> {
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
-        let line = if i % 5000 == 0 {
+        let line = if i.is_multiple_of(5000) {
             format!("target.user{}@bench-target.test:Passw0rd{}\n", i, x % 10_000)
-        } else if i % 7919 == 0 {
+        } else if i.is_multiple_of(7919) {
             format!("https://login.bench-target.test/u{}:{}.{}.{}.{}\n", i, 10, x % 256, (x >> 8) % 256, (x >> 16) % 256)
         } else {
             format!(

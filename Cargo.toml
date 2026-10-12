@@ -15,7 +15,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/ProwlCat/ProwlCat"
+repository = "https://github.com/m0s-s/ProwlCat"
 authors = ["ProwlCat Contributors"]
 description = "Local-first high-performance breach corpus search"
 
@@ -44,3 +44,9 @@ indicatif = "0.17"
 crossbeam-channel = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
