@@ -47,3 +47,4 @@ output/
 # Backup
 *.bak
 *.tmp
+graphify-out/
