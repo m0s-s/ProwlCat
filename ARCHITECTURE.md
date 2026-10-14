@@ -70,14 +70,14 @@ Reference: [ripgrep](https://github.com/BurntSushi/ripgrep) demonstrates Rust st
 └─────────┘         └─────────────┘       └─────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
-│                    Result Model                           │
-│  ScanResult { query, kind, location, context, extracted } │
+│                    Result Model                             │
+│  ScanResult { query, kind, location, context, extracted }   │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
-│                    Output Layer                           │
+│                    Output Layer                             │
 │  Terminal │ JSON │ NDJSON │ CSV                             │
-└───────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────┘
 ```
 
 **Principles:** streaming first, parallelism per file, fail-soft on unreadable files, optional index for repeat queries.
