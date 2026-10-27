@@ -22,7 +22,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       # Windows: link the C runtime statically, so no Visual C++ Redistributable is needed.
-      RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+      RUSTFLAGS: ${{ startsWith(matrix.os, 'windows') &&'-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
