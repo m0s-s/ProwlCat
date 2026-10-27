@@ -284,3 +284,68 @@ fn progress_tops_up_for_mmap() {
     reader.for_each_line(|_, _, _, _| {}).unwrap();
     assert_eq!(counter.load(Ordering::Relaxed), size);
 }
+
+// ---- live matches and cancellation (used by the TUI) ----
+
+#[test]
+fn live_sink_receives_every_match() {
+    use prowlcat_core::ProgressHandle;
+
+    let dir = scratch_dir("live");
+    std::fs::write(dir.join("a.txt"), SAMPLE).unwrap();
+    std::fs::write(dir.join("b.txt"), SAMPLE).unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = ProgressHandle { live: Some(tx), ..ProgressHandle::default() };
+    let queries = TargetParser::new(TypeHint::Email)
+        .parse_many(["alice@example.com", "bob@example.com"])
+        .unwrap();
+    let config = ScanConfig {
+        paths: vec![dir],
+        threads: 2,
+        progress: Some(handle),
+        ..ScanConfig::default()
+    };
+    let (results, summary) = ScanOrchestrator::new(config, queries).run().unwrap();
+
+    // The orchestrator owns the only sender once `run` returns, so dropping it ends the stream.
+    let live: Vec<_> = rx.try_iter().collect();
+    assert_eq!(summary.matches, 4);
+    assert_eq!(live.len(), results.len(), "live stream mirrors the result list");
+}
+
+#[test]
+fn cancel_flag_stops_the_scan() {
+    use prowlcat_core::ProgressHandle;
+    use std::sync::atomic::Ordering;
+
+    let dir = scratch_dir("cancel");
+    std::fs::write(dir.join("a.txt"), SAMPLE.repeat(50)).unwrap();
+
+    let handle = ProgressHandle::default();
+    handle.cancel.store(true, Ordering::Relaxed);
+    let queries = TargetParser::new(TypeHint::Email).parse_many(["alice@example.com"]).unwrap();
+    let config = ScanConfig {
+        paths: vec![dir],
+        threads: 1,
+        progress: Some(handle),
+        ..ScanConfig::default()
+    };
+    let (results, summary) = ScanOrchestrator::new(config, queries).run().unwrap();
+    assert!(results.is_empty(), "a pre-cancelled scan finds nothing");
+    assert_eq!(summary.errors, 0, "cancelling is not an error");
+}
+
+#[test]
+fn default_progress_changes_nothing() {
+    use prowlcat_core::ProgressHandle;
+
+    let dir = scratch_dir("noop-progress");
+    std::fs::write(dir.join("a.txt"), SAMPLE.repeat(30)).unwrap();
+    let run = |progress: Option<ProgressHandle>| {
+        let queries = TargetParser::new(TypeHint::Email).parse_many(["alice@example.com"]).unwrap();
+        let config = ScanConfig { paths: vec![dir.clone()], threads: 2, progress, ..ScanConfig::default() };
+        ScanOrchestrator::new(config, queries).run().unwrap().1.matches
+    };
+    assert_eq!(run(None), run(Some(ProgressHandle::default())));
+}

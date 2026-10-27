@@ -18,3 +18,7 @@ prowlcat-core = { path = "../prowlcat-core" }
 prowlcat-output = { path = "../prowlcat-output" }
 prowlcat-source = { path = "../prowlcat-source" }
 prowlcat-index = { path = "../prowlcat-index" }
+prowlcat-tui = { path = "../prowlcat-tui" }
+
+[dev-dependencies]
+tempfile = "3"

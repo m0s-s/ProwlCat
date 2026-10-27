@@ -9,6 +9,7 @@ members = [
     "crates/prowlcat-match",
     "crates/prowlcat-output",
     "crates/prowlcat-index",
+    "crates/prowlcat-tui",
 ]
 
 [workspace.package]
@@ -42,6 +43,7 @@ criterion = { version = "0.5", default-features = false }
 csv = "1"
 indicatif = "0.17"
 crossbeam-channel = "0.5"
+ratatui = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

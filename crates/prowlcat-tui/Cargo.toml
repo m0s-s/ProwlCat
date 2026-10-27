@@ -1,0 +1,21 @@
+[package]
+name = "prowlcat-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interactive terminal UI for ProwlCat: Night Eyes theme and the animated Fang mascot"
+
+[dependencies]
+anyhow.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+prowlcat-core = { path = "../prowlcat-core" }
+prowlcat-output = { path = "../prowlcat-output" }
+prowlcat-source = { path = "../prowlcat-source" }
+prowlcat-index = { path = "../prowlcat-index" }
+prowlcat-types = { path = "../prowlcat-types" }
+
+[dev-dependencies]
+tempfile = "3"

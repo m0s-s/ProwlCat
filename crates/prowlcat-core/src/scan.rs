@@ -43,6 +43,11 @@ impl ScanOrchestrator {
             entries
                 .par_iter()
                 .flat_map(|entry| {
+                    if let Some(p) = &self.config.progress {
+                        if p.cancel.load(Ordering::Relaxed) {
+                            return Vec::new();
+                        }
+                    }
                     match scan_entry(entry, &engine, mmap_threshold, max_matches, &self.config.passwords, self.config.progress.as_ref(), &bytes_scanned) {
                         Ok(matches) => {
                             if let Some(p) = &self.config.progress {
@@ -92,7 +97,19 @@ fn scan_entry(
     if let Some(p) = progress {
         reader = reader.with_progress(p.done.clone());
     }
+    // Cancellation is polled every 1024 lines so the hot loop stays free of atomic loads.
+    let cancel = progress.map(|p| p.cancel.clone());
+    let live = progress.and_then(|p| p.live.as_ref());
+    let mut stopped = false;
     reader.for_each_line(|member, line_no, offset, line: &[u8]| {
+        if line_no & 0x3FF == 0 {
+            if let Some(c) = &cancel {
+                stopped = c.load(Ordering::Relaxed);
+            }
+        }
+        if stopped {
+            return;
+        }
         bytes_scanned.fetch_add(line.len() as u64, Ordering::Relaxed);
         let hits = engine.match_line(line);
         for hit in hits {
@@ -101,7 +118,7 @@ fn scan_entry(
                 continue;
             }
             per_query[idx] += 1;
-            out.push(ScanResult {
+            let result = ScanResult {
                 query: engine.query_raw(idx).to_string(),
                 kind: engine.query_kind(idx),
                 match_kind: hit.match_kind,
@@ -114,7 +131,13 @@ fn scan_entry(
                 line_text: String::from_utf8_lossy(line).into_owned(),
                 matched_span: hit.span,
                 extracted: hit.extracted,
-            });
+            };
+            // Hits reach a watching UI as they are found, even inside one huge file. A closed
+            // receiver just means nobody is watching any more.
+            if let Some(tx) = live {
+                let _ = tx.send(result.clone());
+            }
+            out.push(result);
         }
     })?;
 

@@ -1,6 +1,9 @@
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
+
+use prowlcat_types::ScanResult;
 
 /// Shared counters a UI can poll while a scan runs. Bytes are raw on-disk bytes.
 #[derive(Debug, Clone, Default)]
@@ -13,6 +16,12 @@ pub struct ProgressHandle {
     pub files_done: Arc<AtomicU64>,
     /// Matches found so far.
     pub matches: Arc<AtomicU64>,
+    /// Set to `true` to ask the scan to stop. Files not yet started are skipped and running
+    /// files stop matching within a few hundred lines; the scan then returns what it has.
+    pub cancel: Arc<AtomicBool>,
+    /// When set, every match is also sent here as soon as its file has been scanned, so a UI
+    /// can show hits live. The final result list is unaffected.
+    pub live: Option<Sender<ScanResult>>,
 }
 
 /// Runtime configuration for a scan job.
