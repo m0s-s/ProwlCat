@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1705,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1727,7 +1727,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-decode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bstr",
@@ -1744,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "prowlcat-decode",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-match"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-output"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "csv",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-source"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "glob",
@@ -1798,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "prowlcat-core",
@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "prowlcat-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ipnet",
  "serde",

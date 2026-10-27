@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Interactive terminal UI (new `prowlcat-tui` crate, built on ratatui): home screen with recent searches and a command palette, live scan view with streaming hits, results explorer with filter, export and copy, and a corpus/index screen. It opens when `prowlcat` is run with no subcommand in a terminal.
 - Night Eyes theme (amber on black) with graceful fallbacks: 256 colours, 16 colours, `NO_COLOR`, and an ASCII-only mode.
