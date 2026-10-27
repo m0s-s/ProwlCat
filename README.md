@@ -1,58 +1,143 @@
 # ProwlCat
 
-High-performance, **local-first** breach corpus search engine written in Rust. Scan single files, `.gz` archives, and large directory trees without external APIs.
+[![CI](https://github.com/m0s-s/ProwlCat/actions/workflows/ci.yml/badge.svg)](https://github.com/m0s-s/ProwlCat/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/m0s-s/ProwlCat)](https://github.com/m0s-s/ProwlCat/releases)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
-## Features
+**A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.zst`, `.tar`, `.tar.gz`, `.zip`) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
 
-- Email, domain, IP, and CIDR search (with intelligent subnet matching)
-- Plain-text substring search (`--loose` / `-t text`)
-- Streaming I/O with parallel per-file workers (Rayon)
-- Auto-detection of `.gz`, `.zst`, `.tar`, `.tar.gz` and `.zip` files (encrypted zips with your own candidate passwords)
-- Optional Tantivy index for fast repeated searches
-- Progress bar on interactive terminals
-- Terminal, JSON, NDJSON, and CSV output
-- Interactive terminal UI (the default when you run `prowlcat` in a terminal): live hits, a results explorer, an index screen, and **Fang**, the animated mascot
-- A scripting interface that never changes: every subcommand behaves the same with or without a terminal
+<p align="center">
+  <img src="assets/screenshots/tui-home.png" alt="ProwlCat interactive interface: the home screen with Fang, the mascot" width="860">
+</p>
+
+- **Two interfaces, one engine.** An interactive terminal UI for exploring, and a classic command line that never changes, for scripts and pipelines.
+- **Built for big corpora.** Parallel scanning, streaming decompression, and memory that stays flat however many matches a search finds: results that do not fit in RAM wait on disk.
+- **Every common container.** Reads inside archives without extracting them, including password-protected zips (with passwords you supply).
+- **Optional index.** Build a [Tantivy](https://github.com/quickwit-oss/tantivy) index once, then repeat searches almost instantly.
+
+> ProwlCat is a tool for security research, incident response and checking exposure of accounts you are authorised to look into. It searches data you already have on your own machine. Make sure you have the right to hold and search the data you point it at.
+
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Interactive mode](#interactive-mode)
+- [Command line](#command-line)
+- [What gets matched](#what-gets-matched)
+- [Output formats](#output-formats)
+- [Large searches and memory](#large-searches-and-memory)
+- [Indexing](#indexing)
+- [Environment variables](#environment-variables)
+- [Development](#development)
 
 ## Install
 
-Download a binary for Linux, macOS or Windows from the [Releases](https://github.com/m0s-s/ProwlCat/releases) page, or build from source (Rust stable):
+### Prebuilt binaries
+
+Download the archive for your system from the [Releases](https://github.com/m0s-s/ProwlCat/releases) page. Each one has a `.sha256` file next to it.
+
+| System | Archive |
+|--------|---------|
+| Linux x86-64 | `prowlcat-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `prowlcat-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `prowlcat-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| Windows x86-64 | `prowlcat-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+
+```bash
+sha256sum -c prowlcat-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar xzf prowlcat-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+```
+
+The macOS binaries are not signed or notarised. If macOS refuses to run one, clear the quarantine flag once with `xattr -d com.apple.quarantine prowlcat`, or right-click the file and choose Open.
+
+### From source
+
+You need a recent stable [Rust toolchain](https://rustup.rs).
 
 ```bash
 cargo install --git https://github.com/m0s-s/ProwlCat prowlcat-cli
+
+# or, from a checkout
+cargo build --release          # binary: target/release/prowlcat
 ```
 
 ## Quick start
 
 ```bash
-cargo build --release
-./target/release/prowlcat search user@example.com -p /path/to/breaches -r
+# Open the interactive interface (it remembers your corpus between runs)
+prowlcat
+
+# Or search straight from the command line
+prowlcat search user@example.com -p /path/to/breaches -r
 ```
+
+`-p` takes files, directories or globs, and `-r` descends into subdirectories.
 
 ## Interactive mode
 
-Run `prowlcat` on its own in a terminal:
+Run `prowlcat` on its own in a terminal. Type a target (an email, a domain, an IP, a CIDR range) and press enter. **Fang**, the mascot, prowls while the scan runs, hits stream in live, and the results open in an explorer when it finishes.
 
 ```bash
-prowlcat                          # opens the interface; the corpus is remembered between runs
+prowlcat                               # open the interface
 prowlcat tui acme.corp -p ~/breaches   # same, and start searching right away
 ```
 
-Type a target (email, domain, IP, CIDR) and press enter. Fang prowls while the scan runs, hits stream in live, and the results open in an explorer when it finishes. Type `/` for the command list.
+<p align="center">
+  <img src="assets/screenshots/tui-results.png" alt="The results explorer: files on the left, matching lines on the right with the match highlighted" width="860">
+</p>
+
+The explorer lists the files that matched, sorted by number of hits, and the matching lines of the selected file, with the matched part highlighted. A panel underneath shows where the line came from (file, line, byte offset).
+
+### Commands
+
+Type `/` at the prompt to see the commands. `up` and `down` move through the list, `tab` completes.
+
+<p align="center">
+  <img src="assets/screenshots/tui-commands.png" alt="The command list opened with /" width="860">
+</p>
+
+| Command | Does |
+|---------|------|
+| `/search` | find a target in the corpus |
+| `/path <dir>` | change the corpus: a folder, files or globs |
+| `/index` | build, use or inspect a Tantivy index |
+| `/stats` | count the corpus files by kind, without searching |
+| `/type <kind>` | force the target type: `auto`, `email`, `domain`, `ip`, `cidr`, `text` |
+| `/export [file]` | write the last results as `.json`, `.csv` or `.ndjson` |
+| `/passwords <file>` | candidate passwords for encrypted zips |
+| `/threads <n>` | number of parallel workers |
+| `/max <n>` | maximum matches per target (`0` = unlimited) |
+| `/history clear` | forget the recent searches |
+| `/help` | keys and tips |
+| `/quit` | leave |
+
+Add `@dir` after a target to search that folder and remember it: `acme.corp @~/breaches/2023`.
+
+### Keys
 
 | Key | Where | Does |
 |-----|-------|------|
-| `/` then a name | home | commands: `/path`, `/index`, `/stats`, `/export`, `/type`, `/passwords`, `/threads`, `/max`, `/history clear`, `/help`, `/quit` |
+| `/` then a name | home | commands |
 | `@dir` after a target | home | search that folder, and remember it |
 | `tab` | home | complete a `/command` or an `@path` |
 | `up` / `down` | home | recent searches |
 | `esc` | scan | stop the search |
-| `up/down`, `tab` | results | move, switch between files and lines |
-| `/`, `e`, `y` | results | filter, export (`.json` `.csv` `.ndjson`), copy the line |
+| `up` / `down`, `tab` | results | move, switch between the file list and the lines |
+| `/`, `e`, `y` | results | filter, export, copy the line |
 | `?` | anywhere | cheat sheet |
 | `ctrl+c` | anywhere | quit |
 
-The interface uses the Night Eyes theme (amber on black) and adapts to the terminal: truecolor, 256 or 16 colours, `NO_COLOR`, and an ASCII-only mode for non-UTF-8 locales. Terminals that are too short swap the mascot for a pair of eyes.
+<p align="center">
+  <img src="assets/screenshots/tui-help.png" alt="Fang's cheat sheet" width="860">
+</p>
+
+### Look and feel
+
+The interface uses the **Night Eyes** theme (amber on black). It adapts to the terminal: truecolor, 256 or 16 colours, `NO_COLOR`, and an ASCII-only mode for non-UTF-8 locales. A terminal that is too short swaps the mascot for a pair of eyes. `PROWLCAT_NO_ANIM=1` holds a still frame instead of animating Fang.
+
+Pressing `esc` during a scan stops it: files not yet started are skipped and the file being read stops matching within a few hundred lines. A very large single file may still be read to its end in the background.
+
+The interface remembers the last corpus path, index path and your recent targets in a small JSON file in the per-user state directory. Targets can be sensitive: turn it off with `--no-history` (or `PROWLCAT_NO_HISTORY=1`), or clear it with `/history clear`.
 
 ### Choosing the interface
 
@@ -68,7 +153,236 @@ The command line is the scripting interface and is untouched. The interactive UI
 
 `--ui` takes `auto` (default), `tui` or `cli`. Put `PROWLCAT_UI=cli` in a script's environment to guarantee the classic behaviour whatever its caller does. Exit codes, output formats and flags of `search`, `index` and `stats` are the same in every mode.
 
-### Environment
+## Command line
+
+```
+prowlcat search [OPTIONS] [TARGET]...
+prowlcat index  [OPTIONS] --path <PATHS> --output <DIR>
+prowlcat stats  [OPTIONS] --path <PATHS>
+prowlcat tui    [OPTIONS] [TARGET]...
+```
+
+### `prowlcat search`
+
+Search for one or more targets. Several targets can be given on the command line or read from a file; each is searched in a single pass over the corpus.
+
+| Option | Description |
+|--------|-------------|
+| `[TARGET]...` | targets: email, domain, IP, CIDR or plain text |
+| `-f, --targets-file <FILE>` | file with one target per line |
+| `-p, --path <PATH>` | files, directories or globs to scan (repeatable) |
+| `-r, --recursive` | descend into subdirectories |
+| `--index <DIR>` | search a prebuilt index instead of scanning (see [Indexing](#indexing)) |
+| `-t, --type <TYPE>` | force the target type: `auto` (default), `email`, `domain`, `ip`, `cidr`, `text` |
+| `--loose` | plain-text, case-insensitive substring search, no type inference |
+| `-m, --max-matches <N>` | maximum matches per target (`0` = unlimited, the default) |
+| `-j, --threads <N>` | parallel worker threads (default: all cores) |
+| `-o, --output <FILE>` | write the results to a file; the extension picks the format (`.json`, `.ndjson`, `.csv`) |
+| `--format <FORMAT>` | override the format of `-o`: `table`, `json`, `ndjson`, `csv` |
+| `--password <PW>` | password for encrypted zips (repeatable; visible in the process list, prefer the file) |
+| `--password-file <FILE>` | file with one candidate password per line |
+| `--no-progress` | no progress bar |
+| `-q, --quiet`, `-v, --verbose` | less or more logging |
+| `--ui <auto\|tui\|cli>` | choose the interface (see above) |
+
+Without `-o` the results are printed as a readable table on standard output.
+
+### `prowlcat index`
+
+Build a Tantivy index of a corpus. See [Indexing](#indexing).
+
+| Option | Description |
+|--------|-------------|
+| `-p, --path <PATH>` | files, directories or globs to index |
+| `-o, --output <DIR>` | directory to create the index in (must not exist or be empty) |
+| `-r, --recursive` | descend into subdirectories |
+| `-j, --threads <N>` | parallel worker threads |
+| `--password`, `--password-file` | as for `search` |
+
+### `prowlcat stats`
+
+Count what is in a corpus, by kind, without searching it.
+
+```console
+$ prowlcat stats -p ./breaches -r
+ProwlCat stats
+  files:      3
+  plaintext:  2
+  gzip:       1
+  zstd:       0
+  tar/tar.gz: 0
+  zip:        0
+  total size: 0.00 GB
+```
+
+### Examples
+
+```bash
+# Email
+prowlcat search user@example.com -p ./breaches -r
+
+# Several targets at once, one pass over the data
+prowlcat search alice@example.com bob@example.com -p ./breaches -r
+
+# Domain: emails, URLs and subdomains
+prowlcat search example.com -t domain -p ./data
+
+# IP and CIDR
+prowlcat search 203.0.113.42 -t ip -p ./logs
+prowlcat search 10.0.0.0/8 -t cidr -p ./logs
+
+# Plain text (case-insensitive substring)
+prowlcat search Winter2024 -t text -p ./breaches
+prowlcat search "john.smith" --loose -p ./breaches
+
+# Targets from a file, results to JSON
+prowlcat search -f targets.txt -p ./dumps -o results.json
+
+# Encrypted zips: supply candidate passwords (ProwlCat tries them, it does not crack)
+prowlcat search user@example.com -p ./dumps --password-file passwords.txt
+
+# Stop after the first 100 matches per target
+prowlcat search example.com -p ./data -m 100
+```
+
+In a script, pin the classic behaviour and read the exit code:
+
+```bash
+export PROWLCAT_UI=cli
+prowlcat search user@example.com -p ./breaches -r --no-progress -o hits.ndjson
+case $? in
+  0) echo "found" ;;
+  1) echo "no matches" ;;
+  *) echo "error" >&2 ;;
+esac
+
+# Count the matches per file with jq
+jq -r '.source.path' hits.ndjson | sort | uniq -c | sort -rn
+```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | matches found |
+| `1` | no matches |
+| `2` | error |
+
+## What gets matched
+
+| Type | Flag | Behaviour |
+|------|------|-----------|
+| auto | `-t auto` (default) | infers email, IP, CIDR or domain from the target |
+| email | `-t email` | the address, as a whole token |
+| domain | `-t domain` | the domain in emails, URLs and subdomains (see below) |
+| ip | `-t ip` | a single IPv4 or IPv6 address, as a whole token |
+| cidr | `-t cidr` | the literal CIDR string, and every IP address inside the network |
+| text | `-t text` or `--loose` | case-insensitive substring, no type rules |
+
+**Domain search** finds `example.com` in:
+
+- email addresses: `user@example.com`
+- subdomains: `b@mail.example.com`, `mail.example.com`
+- URLs: `https://example.com/login`, `https://shop.example.com/`
+
+It does not match longer names such as `example.community` or `notexample.com`.
+
+**Containers.** ProwlCat detects the format from the file and reads inside it without extracting to disk:
+
+| Format | Notes |
+|--------|-------|
+| plain text | large files are memory-mapped |
+| `.gz`, `.zst` | streamed |
+| `.tar`, `.tar.gz` | each entry is scanned; matches show the entry name |
+| `.zip` | including encrypted archives, with the passwords you provide |
+
+Matches are always reported in a stable order: by target, then file path, then line number.
+
+## Output formats
+
+The default is a readable table (line numbers start at 1 here):
+
+```console
+$ prowlcat search ivan18@example.com mallory508@mail.example.com -p ./demo -r --no-progress
+ProwlCat | 2 targets | 3 files | 0.00 GB scanned | 2 matches | 0.0s
+
+[email] ivan18@example.com
+  └─ demo/forum-dump.txt.gz:6
+     ivan18@example.com:Password1!
+
+[email] mallory508@mail.example.com
+  └─ demo/forum-dump.txt.gz:42
+     mallory508@mail.example.com:dragon99
+```
+
+A CIDR search reports each address found inside the range:
+
+```console
+$ prowlcat search 198.51.100.0/24 -t cidr -p ./demo -r --no-progress
+[cidr] 198.51.100.0/24 [IpInNetwork: Ip("198.51.100.108")]
+  └─ demo/acme-2019.txt:4
+     198.51.100.108 admin hunter2
+```
+
+With `-o`, results go to a file. Every format writes one result at a time, so memory does not grow with the number of matches.
+
+| Extension | Format |
+|-----------|--------|
+| `.json` | one compact JSON document on a single line: `{"results": [...], "summary": {...}}`. Pipe it through `jq .` to read it |
+| `.ndjson`, `.jsonl` | one JSON object per match, one per line |
+| `.csv` | a header row, then one row per match |
+
+In the JSON, NDJSON and CSV files `line_number` and `line` count from 0; the table counts from 1.
+
+NDJSON (one match per line, shown wrapped here):
+
+```json
+{"query":"ivan18@example.com","kind":"email","match_kind":"exact",
+ "source":{"path":"demo/forum-dump.txt.gz","archive_entry":null,"line_number":5,"byte_offset":177},
+ "line_text":"ivan18@example.com:Password1!","matched_span":[0,18],
+ "extracted":[{"email":"ivan18@example.com"}]}
+```
+
+CSV:
+
+```csv
+query,kind,match_kind,path,line,byte_offset,context
+ivan18@example.com,Email,Exact,demo/forum-dump.txt.gz,5,177,ivan18@example.com:Password1!
+```
+
+## Large searches and memory
+
+A search over a big breach can match hundreds of millions of lines. ProwlCat keeps memory flat:
+
+- Matches are held in a compact form, up to a budget of **256 MiB** of RAM (`PROWLCAT_RESULT_MEM_MB`).
+- Past the budget they are sorted and written to temporary files on disk, then merged back in the usual order. The size of the result set is limited by free disk space, not by memory.
+- Results and their order are the same whatever the budget; it only trades memory for speed.
+
+**Where the temporary files go.** They must not land in RAM. If the system temporary directory is a `tmpfs` (the default `/tmp` on several Linux distributions), ProwlCat uses `/var/tmp` or `~/.cache/prowlcat` instead and logs a warning. To choose the location yourself, for example a big disk:
+
+```bash
+PROWLCAT_TMP_DIR=/mnt/big-disk/tmp prowlcat
+```
+
+A very large search can write many gigabytes there while it runs; the files are removed when it ends. Keep an eye on free space with `df -h`.
+
+**In the interactive interface** the results screen shows the first 250,000 matches. A search that finds more still counts all of them, and `/export` writes the complete set.
+
+**`--max-matches`** limits matches per target within each file. It is the quickest way to bound a search whose first results are enough.
+
+## Indexing
+
+For a corpus you search again and again, build an index once and search it instead of scanning the files:
+
+```bash
+prowlcat index -p ./breaches -r -o ./breaches.idx
+prowlcat search user@example.com --index ./breaches.idx
+prowlcat search example.com -t domain --index ./breaches.idx
+```
+
+The index covers emails, domains and IP addresses (including CIDR ranges). Plain-text and `--loose` targets are not supported with an index; scan the files for those. The index records where each match is, so results are the same as a scan would give. `/index` in the interactive interface builds, selects or inspects one.
+
+## Environment variables
 
 | Variable | Effect |
 |----------|--------|
@@ -80,72 +394,22 @@ The command line is the scripting interface and is untouched. The interactive UI
 | `NO_COLOR` | no colours at all |
 | `PROWLCAT_ASCII=1` | plain ASCII glyphs and mascot |
 | `PROWLCAT_RESULT_MEM_MB` | RAM used to hold matches before they are parked in temporary files (default 256); affects memory and speed, never the results |
-| `PROWLCAT_TMP_DIR` | directory for the temporary files that hold matches past the memory budget; by default the system temp directory, or `/var/tmp` / `~/.cache/prowlcat` when that is a RAM-backed tmpfs |
+| `PROWLCAT_TMP_DIR` | directory for those temporary files; by default the system temp directory, or `/var/tmp` / `~/.cache/prowlcat` when that is a RAM-backed `tmpfs` |
 | `PROWLCAT_LOG_FILE` | write log lines to this file while the interface is open (they would otherwise draw over it) |
-
-The remembered state is a small JSON file with the last corpus path, index path and your recent targets. Targets can be sensitive: turn it off with `--no-history`, or clear it with `/history clear`.
-
-Pressing `esc` during a scan stops it: files not yet started are skipped and the file being read stops matching within a few hundred lines. A very large single file may still be read to its end in the background.
-
-## Examples
-
-```bash
-# Email
-prowlcat search user@example.com -p ./breaches -r
-
-# Domain
-prowlcat search example.com -t domain -p ./data
-
-# IP and CIDR
-prowlcat search 203.0.113.42 -t ip -p ./logs
-prowlcat search 10.0.0.0/8 -t cidr -p ./logs
-
-# Plain text (case-insensitive substring)
-prowlcat search Winter2024 -t text -p ./breaches
-prowlcat search "john.smith" --loose -p ./breaches
-
-# Targets from file, JSON export
-prowlcat search -f targets.txt -p ./dumps -o results.json
-
-# Corpus statistics (no search)
-prowlcat stats -p ./breaches -r
-
-# Encrypted zips: supply candidate passwords (no cracking)
-prowlcat search user@example.com -p ./dumps --password-file passwords.txt
-
-# Index once, search many times (no text/--loose targets)
-prowlcat index -p ./breaches -o ./breaches.idx
-prowlcat search user@example.com --index ./breaches.idx
-```
-
-## Exit codes
-
-`0` matches found, `1` no matches, `2` error.
 
 ## Development
 
 ```bash
+cargo build --workspace --locked
 cargo test --workspace
-cargo bench -p prowlcat-core --bench scan   # PROWLCAT_BENCH_MB sets corpus size
+cargo clippy --workspace --all-targets -- -D warnings      # CI requires this
+cargo bench -p prowlcat-core --bench scan                  # PROWLCAT_BENCH_MB sets the corpus size
 ```
 
-Pushing a `v*` tag builds and publishes release binaries via GitHub Actions.
+The workspace is split into small crates: `prowlcat-source` (file enumeration), `prowlcat-decode` (line readers for every container), `prowlcat-match` (the matching engine), `prowlcat-core` (the parallel scan and the bounded result store), `prowlcat-output` (streaming writers), `prowlcat-index` (Tantivy), `prowlcat-tui` (the interface) and `prowlcat-cli` (the `prowlcat` binary). [ARCHITECTURE.md](./ARCHITECTURE.md) explains how they fit together. Changes are listed in [CHANGELOG.md](./CHANGELOG.md).
 
-## Search types
-
-| Type | Flag | Behavior |
-|------|------|----------|
-| auto | `-t auto` (default) | Infers email, IP, CIDR, or domain |
-| email | `-t email` | Email address |
-| domain | `-t domain` | Domain in emails, URLs, subdomains |
-| ip | `-t ip` | Single IPv4/IPv6 address |
-| cidr | `-t cidr` | Literal CIDR string + IPs inside network |
-| text | `-t text` or `--loose` | Substring match, no type rules |
-
-## Documentation
-
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — design, matching logic, roadmap
+Pushing a `v*` tag builds and publishes release binaries for Linux, macOS and Windows through GitHub Actions.
 
 ## License
 
-GNU Affero General Public License v3.0 — see [LICENSE](./LICENSE).
+GNU Affero General Public License v3.0 or later. See [LICENSE](./LICENSE).

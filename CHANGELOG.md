@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
+- Docs: the README is rewritten with screenshots of the interface, the full command-line reference, output samples and a section on large searches.
+- Fix: in the interface's help sheet the key column ran into the descriptions (`@dirsearch…`); the column and the box are wider.
 - Fix: domain searches now match subdomains and URLs (`example.com` finds `b@mail.example.com`, `https://example.com/x`) as `include_subdomains` intends; before, only `@example.com` was found. Searches can return more matches than in 0.2.1.
 - Memory: the temporary files that hold matches past the budget are no longer created in a RAM-backed `/tmp` (tmpfs, the default on Arch/CachyOS and others), where a large search filled the RAM anyway. They go to `/var/tmp` or `~/.cache/prowlcat`; `PROWLCAT_TMP_DIR` chooses the directory.
 - Memory/speed: those temporary files use a compact binary encoding instead of JSON lines. They are about 3.7 times smaller and a heavy search spends noticeably less time on them. Results and their order are unchanged.

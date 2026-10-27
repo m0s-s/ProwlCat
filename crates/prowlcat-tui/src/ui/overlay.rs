@@ -12,7 +12,7 @@ use super::{centered, rounded};
 
 pub fn help(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let key = |k: &str| Span::styled(format!("{k:<13}"), t.amber());
+    let key = |k: &str| Span::styled(format!("{k:<16}"), t.amber());
     let row = |k: &str, what: &str| Line::from(vec![key(k), Span::raw(what.to_string())]);
     let head = |s: &str| Line::from(Span::styled(s.to_string(), t.amber_bold()));
 
@@ -41,7 +41,7 @@ pub fn help(f: &mut Frame, app: &App, area: Rect) {
     ];
 
     let height = lines.len() as u16 + 4;
-    let boxed = centered(area, 72, height);
+    let boxed = centered(area, 80, height);
     f.render_widget(Clear, boxed);
     let block = rounded(t, true).padding(Padding::new(2, 2, 1, 1)).title(Line::from(vec![
         Span::styled(" Fang's cheat sheet ", t.amber_bold()),
