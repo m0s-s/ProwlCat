@@ -336,8 +336,8 @@ mod tests {
         assert_eq!(hits[0].source.line_number, Some(0));
 
         let (hits, _) = s.search(&q("example.com", QueryKind::Domain), true, 0).unwrap();
-        // Same result as a full scan: the engine itself only counts `@example.com` here.
-        assert_eq!(hits.len(), 1);
+        // Same result as a full scan: subdomains are included, so `@mail.example.com` counts too.
+        assert_eq!(hits.len(), 2);
 
         let (hits, _) = s.search(&q("mail.example.com", QueryKind::Domain), true, 0).unwrap();
         assert_eq!(hits.len(), 1);

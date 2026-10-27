@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fix: domain searches now match subdomains and URLs (`example.com` finds `b@mail.example.com`, `https://example.com/x`) as `include_subdomains` intends; before, only `@example.com` was found. Searches can return more matches than in 0.2.1.
+- Memory: the temporary files that hold matches past the budget are no longer created in a RAM-backed `/tmp` (tmpfs, the default on Arch/CachyOS and others), where a large search filled the RAM anyway. They go to `/var/tmp` or `~/.cache/prowlcat`; `PROWLCAT_TMP_DIR` chooses the directory.
+
 ## 0.2.1
 
 - Memory: searches with a very large number of matches no longer fill the RAM. Matches are kept in a compact form and, past a budget (256 MiB, `PROWLCAT_RESULT_MEM_MB`), sorted and parked in temporary files that are merged back in order. Results and their order are unchanged; NDJSON, CSV and the table are byte for byte identical to 0.2.0. All formats are now written one result at a time.

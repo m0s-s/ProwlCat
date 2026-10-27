@@ -14,8 +14,8 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -212,9 +212,58 @@ impl Collector {
     }
 }
 
+/// Where result runs are parked. They must not land in RAM: on many Linux systems `/tmp` is a
+/// tmpfs, and a large search would fill it and exhaust memory, which is what the runs exist to
+/// avoid. `PROWLCAT_TMP_DIR` wins; otherwise the system temporary directory is used unless it is
+/// RAM-backed, in which case `/var/tmp` and then `~/.cache/prowlcat` are tried.
+fn spill_dir() -> Option<&'static Path> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        if let Some(dir) = std::env::var_os("PROWLCAT_TMP_DIR").filter(|d| !d.is_empty()) {
+            return Some(PathBuf::from(dir));
+        }
+        let system = std::env::temp_dir();
+        if !ram_backed(&system) {
+            return None;
+        }
+        let cache = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cache")))
+            .map(|c| c.join("prowlcat"));
+        let chosen = [Some(PathBuf::from("/var/tmp")), cache].into_iter().flatten().find(|d| {
+            std::fs::create_dir_all(d).is_ok() && !ram_backed(d) && tempfile::tempfile_in(d).is_ok()
+        });
+        match &chosen {
+            Some(d) => warn!(from = %system.display(), to = %d.display(), "temporary directory is in RAM; parking results elsewhere"),
+            None => warn!(dir = %system.display(), "temporary directory is in RAM; set PROWLCAT_TMP_DIR to a disk"),
+        }
+        chosen
+    })
+    .as_deref()
+}
+
+/// True when `path` lives on a tmpfs or ramfs mount (Linux only).
+fn ram_backed(path: &Path) -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else { return false };
+    let Ok(path) = path.canonicalize() else { return false };
+    mounts
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let (_, mount, fstype) = (f.next()?, f.next()?, f.next()?);
+            path.starts_with(mount).then_some((mount.len(), fstype))
+        })
+        .max_by_key(|(len, _)| *len)
+        .is_some_and(|(_, t)| matches!(t, "tmpfs" | "ramfs"))
+}
+
 fn spill(inner: &mut Inner) -> Result<()> {
     inner.mem.sort_unstable_by_key(|i| i.key);
-    let file = tempfile::tempfile().context("create a temporary file for results")?;
+    let file = match spill_dir() {
+        Some(dir) => tempfile::tempfile_in(dir),
+        None => tempfile::tempfile(),
+    }
+    .context("create a temporary file for results")?;
     {
         let mut out = BufWriter::with_capacity(1 << 20, &file);
         for item in &inner.mem {
@@ -501,6 +550,16 @@ impl<'a> Merge<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ram_backed_detects_tmpfs() {
+        assert!(!ram_backed(Path::new("/")));
+        assert!(!ram_backed(Path::new("/nonexistent/path")));
+        if Path::new("/dev/shm").exists() {
+            assert!(ram_backed(Path::new("/dev/shm")));
+        }
+    }
+
     use super::*;
     use prowlcat_source::SourceEntry;
     use std::path::PathBuf;

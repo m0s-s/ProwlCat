@@ -232,10 +232,12 @@ pub fn match_domain_in_line(
         ]
     };
 
+    // The needle prefix ('@', '.', "://") already delimits the start; only the end must not
+    // run into a longer label (example.com vs example.community).
     for needle in needles {
-        if let Some(pos) = lower.find(&needle) {
+        for (pos, _) in lower.match_indices(&needle) {
             let end = pos + needle.len();
-            if domain_boundary_ok(&lower, pos.saturating_sub(1), end) || needle.starts_with('@') {
+            if !lower.as_bytes().get(end).is_some_and(u8::is_ascii_alphanumeric) {
                 return Some((pos, end));
             }
         }
@@ -344,5 +346,25 @@ mod tests {
     fn ipv6_still_extracted() {
         let ips = extract_ips("addr 2001:db8::1 end");
         assert_eq!(ips.len(), 1);
+    }
+
+    #[test]
+    fn domain_matches_subdomains_and_urls() {
+        let sub = |l: &str| match_domain_in_line(l, "example.com", true);
+        let exact = |l: &str| match_domain_in_line(l, "example.com", false);
+        assert_eq!(sub("b@mail.example.com:y"), Some((6, 18)));
+        assert_eq!(sub("x@a.example.com"), Some((3, 15)));
+        assert_eq!(sub("https://example.com/x"), Some((5, 19)));
+        assert_eq!(sub("https://shop.example.com/"), Some((12, 24)));
+        assert_eq!(sub("mail.example.com"), Some((4, 16)));
+        assert_eq!(sub("example.community https://example.com"), Some((23, 37)));
+        assert_eq!(sub("a@example.com"), Some((1, 13)));
+        assert_eq!(sub("a@example.com:pw"), Some((1, 13)));
+        assert_eq!(sub("a@example.community"), None);
+        assert_eq!(sub("a@notexample.com"), None);
+        assert_eq!(exact("http://www.example.com/"), Some((4, 22)));
+        assert_eq!(exact("https://example.com"), Some((5, 19)));
+        assert_eq!(exact("b@mail.example.com"), None);
+        assert_eq!(exact("a@example.community"), None);
     }
 }

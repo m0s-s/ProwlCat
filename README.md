@@ -80,6 +80,7 @@ The command line is the scripting interface and is untouched. The interactive UI
 | `NO_COLOR` | no colours at all |
 | `PROWLCAT_ASCII=1` | plain ASCII glyphs and mascot |
 | `PROWLCAT_RESULT_MEM_MB` | RAM used to hold matches before they are parked in temporary files (default 256); affects memory and speed, never the results |
+| `PROWLCAT_TMP_DIR` | directory for the temporary files that hold matches past the memory budget; by default the system temp directory, or `/var/tmp` / `~/.cache/prowlcat` when that is a RAM-backed tmpfs |
 | `PROWLCAT_LOG_FILE` | write log lines to this file while the interface is open (they would otherwise draw over it) |
 
 The remembered state is a small JSON file with the last corpus path, index path and your recent targets. Targets can be sensitive: turn it off with `--no-history`, or clear it with `/history clear`.
