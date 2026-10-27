@@ -17,6 +17,7 @@ prowlcat-decode = { path = "../prowlcat-decode" }
 prowlcat-match = { path = "../prowlcat-match" }
 ipnet = { workspace = true }
 tempfile = "3"
+bincode = "1.3"
 
 [dev-dependencies]
 flate2.workspace = true

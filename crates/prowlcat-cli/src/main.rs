@@ -210,6 +210,9 @@ struct StatsArgs {
 }
 
 fn main() -> ExitCode {
+    // Scans open many files at once (inputs and, for big result sets, temporary files); the
+    // usual soft limit of 1024 is far below what the system allows.
+    let _ = rlimit::increase_nofile_limit(u64::MAX);
     match run() {
         Ok(code) => code,
         Err(e) => {

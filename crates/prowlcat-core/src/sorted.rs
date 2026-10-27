@@ -13,11 +13,12 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -117,14 +118,24 @@ fn dense_ranks<T>(items: &[T], cmp: impl Fn(&T, &T) -> Ordering) -> Vec<u32> {
 }
 
 /// A sorted batch of matches parked in an anonymous temporary file (deleted on close).
+///
+/// Many runs share one file, one after the other, so a very large search holds a few dozen file
+/// descriptors rather than one per run (the default limit is often 1024).
 struct Run {
-    file: File,
+    file: Arc<File>,
+    start: u64,
+    len: u64,
 }
+
+/// A temporary file is closed to new runs once it holds this much.
+const SPILL_FILE_MAX: u64 = 1 << 30;
 
 struct Inner {
     mem: Vec<Item>,
     mem_bytes: usize,
     runs: Vec<Run>,
+    /// File new runs are appended to, and how much it holds.
+    current: Option<(Arc<File>, u64)>,
     total: u64,
     /// Matches of a file that were handed over before the file was finished.
     partial: HashMap<u32, u64>,
@@ -149,6 +160,7 @@ impl Collector {
                 mem: Vec::new(),
                 mem_bytes: 0,
                 runs: Vec::new(),
+                current: None,
                 total: 0,
                 partial: HashMap::new(),
                 dropped: HashSet::new(),
@@ -259,20 +271,29 @@ fn ram_backed(path: &Path) -> bool {
 
 fn spill(inner: &mut Inner) -> Result<()> {
     inner.mem.sort_unstable_by_key(|i| i.key);
-    let file = match spill_dir() {
-        Some(dir) => tempfile::tempfile_in(dir),
-        None => tempfile::tempfile(),
-    }
-    .context("create a temporary file for results")?;
+    let (file, start) = match inner.current.take() {
+        Some((file, len)) if len < SPILL_FILE_MAX => (file, len),
+        _ => {
+            let file = match spill_dir() {
+                Some(dir) => tempfile::tempfile_in(dir),
+                None => tempfile::tempfile(),
+            }
+            .context("create a temporary file for results")?;
+            (Arc::new(file), 0)
+        }
+    };
+    // On failure `current` stays empty, so the next spill starts a fresh file and whatever was
+    // half written here is never read.
     {
-        let mut out = BufWriter::with_capacity(1 << 20, &file);
+        let mut out = BufWriter::with_capacity(1 << 20, &*file);
         for item in &inner.mem {
-            serde_json::to_writer(&mut out, item)?;
-            out.write_all(b"\n")?;
+            spill_codec().serialize_into(&mut out, item).context("write a result to disk")?;
         }
         out.flush()?;
     }
-    inner.runs.push(Run { file });
+    let end = (&*file).stream_position().context("measure the temporary file")?;
+    inner.current = Some((file.clone(), end));
+    inner.runs.push(Run { file, start, len: end - start });
     inner.mem = Vec::new();
     inner.mem_bytes = 0;
     Ok(())
@@ -429,11 +450,16 @@ impl Iterator for Iter<'_> {
 struct At<'a> {
     file: &'a File,
     pos: u64,
+    end: u64,
 }
 
 impl Read for At<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = read_at(self.file, buf, self.pos)?;
+        let room = (self.end - self.pos).min(buf.len() as u64) as usize;
+        if room == 0 {
+            return Ok(0);
+        }
+        let n = read_at(self.file, &mut buf[..room], self.pos)?;
         self.pos += n as u64;
         Ok(n)
     }
@@ -451,17 +477,20 @@ fn read_at(file: &File, buf: &mut [u8], pos: u64) -> io::Result<usize> {
 
 struct RunReader<'a> {
     reader: BufReader<At<'a>>,
-    line: String,
 }
 
 impl RunReader<'_> {
     fn next(&mut self) -> Result<Option<Item>> {
-        self.line.clear();
-        if self.reader.read_line(&mut self.line).context("read results back from disk")? == 0 {
+        if self.reader.fill_buf().context("read results back from disk")?.is_empty() {
             return Ok(None);
         }
-        Ok(Some(serde_json::from_str(self.line.trim_end()).context("decode a spilled result")?))
+        Ok(Some(spill_codec().deserialize_from(&mut self.reader).context("decode a spilled result")?))
     }
+}
+
+/// Compact binary encoding of the items in a run (variable-length integers, no field names).
+fn spill_codec() -> impl bincode::Options {
+    bincode::DefaultOptions::new()
 }
 
 enum Source<'a> {
@@ -497,8 +526,7 @@ impl<'a> Merge<'a> {
         let mut sources = vec![Source::Mem(s.mem.iter())];
         for run in &s.runs {
             sources.push(Source::Run(RunReader {
-                reader: BufReader::with_capacity(RUN_READ_BUFFER, At { file: &run.file, pos: 0 }),
-                line: String::new(),
+                reader: BufReader::with_capacity(RUN_READ_BUFFER, At { file: &run.file, pos: run.start, end: run.start + run.len }),
             }));
         }
         let mut m = Self {

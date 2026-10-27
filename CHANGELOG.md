@@ -4,6 +4,8 @@
 
 - Fix: domain searches now match subdomains and URLs (`example.com` finds `b@mail.example.com`, `https://example.com/x`) as `include_subdomains` intends; before, only `@example.com` was found. Searches can return more matches than in 0.2.1.
 - Memory: the temporary files that hold matches past the budget are no longer created in a RAM-backed `/tmp` (tmpfs, the default on Arch/CachyOS and others), where a large search filled the RAM anyway. They go to `/var/tmp` or `~/.cache/prowlcat`; `PROWLCAT_TMP_DIR` chooses the directory.
+- Memory/speed: those temporary files use a compact binary encoding instead of JSON lines. They are about 3.7 times smaller and a heavy search spends noticeably less time on them. Results and their order are unchanged.
+- Memory: spilled runs share a few large temporary files (1 GiB each) instead of one file per run, and the command line raises the open-file limit at start. A search with a huge result set no longer runs out of file descriptors (the usual soft limit is 1024).
 
 ## 0.2.1
 
