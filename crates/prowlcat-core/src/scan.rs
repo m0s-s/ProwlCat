@@ -6,7 +6,8 @@ use rayon::prelude::*;
 use tracing::{debug, warn};
 
 use crate::config::ScanConfig;
-use prowlcat_types::{Query, ScanResult, ScanSummary};
+use crate::sorted::{Collector, Hit, SortedResults};
+use prowlcat_types::{Query, QueryKind, ScanResult, ScanSummary};
 use prowlcat_decode::LineReader;
 use prowlcat_match::MatchEngine;
 use prowlcat_source::{SourceEntry, SourceEnumerator};
@@ -21,6 +22,8 @@ impl ScanOrchestrator {
         Self { config, queries }
     }
 
+    /// Scan and return every match in memory, in scan order. Fine for small result sets; for
+    /// corpora that can match millions of lines use [`run_sorted`](Self::run_sorted).
     pub fn run(&self) -> Result<(Vec<ScanResult>, ScanSummary)> {
         let entries = SourceEnumerator::new(&self.config.paths, self.config.recursive)?.collect()?;
         let engine = MatchEngine::build(&self.queries, self.config.include_subdomains)?;
@@ -48,8 +51,22 @@ impl ScanOrchestrator {
                             return Vec::new();
                         }
                     }
-                    match scan_entry(entry, &engine, mmap_threshold, max_matches, &self.config.passwords, self.config.progress.as_ref(), &bytes_scanned) {
-                        Ok(matches) => {
+                    let mut matches = Vec::new();
+                    let outcome = scan_entry(
+                        entry,
+                        &engine,
+                        mmap_threshold,
+                        max_matches,
+                        &self.config.passwords,
+                        self.config.progress.as_ref(),
+                        &bytes_scanned,
+                        &mut |hit| {
+                            let idx = hit.query_idx;
+                            matches.push(hit.into_result(engine.query_raw(idx), engine.query_kind(idx), &entry.path));
+                        },
+                    );
+                    match outcome {
+                        Ok(()) => {
                             if let Some(p) = &self.config.progress {
                                 p.files_done.fetch_add(1, Ordering::Relaxed);
                                 p.matches.fetch_add(matches.len() as u64, Ordering::Relaxed);
@@ -77,8 +94,81 @@ impl ScanOrchestrator {
 
         Ok((results, summary))
     }
+
+    /// Scan with bounded memory and return the matches in the standard output order (query,
+    /// then path, then line). The matches found so far are kept in at most
+    /// `config.result_memory_mb` of RAM; beyond that they wait in temporary files, so the size of
+    /// the result set is limited by free disk space, not by memory. The matches and their order
+    /// are the ones [`run`](Self::run) followed by a stable sort would give.
+    pub fn run_sorted(&self) -> Result<SortedResults> {
+        let entries = Arc::new(SourceEnumerator::new(&self.config.paths, self.config.recursive)?.collect()?);
+        let engine = MatchEngine::build(&self.queries, self.config.include_subdomains)?;
+        let queries: Vec<(String, QueryKind)> =
+            (0..engine.query_count()).map(|i| (engine.query_raw(i).to_string(), engine.query_kind(i))).collect();
+
+        let progress = self.config.progress.as_ref();
+        if let Some(p) = progress {
+            p.total.store(entries.iter().map(|e| e.size_bytes).sum(), Ordering::Relaxed);
+        }
+
+        let bytes_scanned = Arc::new(AtomicU64::new(0));
+        let errors = Arc::new(AtomicU64::new(0));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(self.config.threads).build()?;
+        let max_matches = self.config.max_matches_per_query;
+        let mmap_threshold = self.config.mmap_threshold_mb * 1024 * 1024;
+        let budget = usize::try_from(self.config.result_memory_mb.saturating_mul(1024 * 1024)).unwrap_or(usize::MAX);
+        let collector = Collector::new(&entries, &queries, budget);
+
+        pool.install(|| {
+            entries.par_iter().enumerate().for_each(|(idx, entry)| {
+                if progress.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) {
+                    return;
+                }
+                let mut local = collector.local(idx as u32);
+                let outcome = scan_entry(
+                    entry,
+                    &engine,
+                    mmap_threshold,
+                    max_matches,
+                    &self.config.passwords,
+                    progress,
+                    &bytes_scanned,
+                    &mut |hit| {
+                        if let Some(p) = progress {
+                            p.matches.fetch_add(1, Ordering::Relaxed);
+                        }
+                        local.push(hit);
+                    },
+                );
+                match outcome {
+                    Ok(()) => {
+                        local.finish();
+                        if let Some(p) = progress {
+                            p.files_done.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(path = %entry.path.display(), error = %e, "scan failed");
+                        errors.fetch_add(1, Ordering::Relaxed);
+                        local.abort();
+                    }
+                }
+            });
+        });
+
+        let summary = ScanSummary {
+            targets: self.queries.len(),
+            files_scanned: entries.len(),
+            bytes_scanned: bytes_scanned.load(Ordering::Relaxed),
+            matches: 0,
+            elapsed_ms: 0,
+            errors: errors.load(Ordering::Relaxed) as usize,
+        };
+        Ok(collector.finish(entries, queries, summary))
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_entry(
     entry: &SourceEntry,
     engine: &MatchEngine,
@@ -87,10 +177,10 @@ fn scan_entry(
     passwords: &[String],
     progress: Option<&crate::config::ProgressHandle>,
     bytes_scanned: &Arc<AtomicU64>,
-) -> Result<Vec<ScanResult>> {
+    emit: &mut dyn FnMut(Hit),
+) -> Result<()> {
     debug!(path = %entry.path.display(), compression = ?entry.compression, "scanning file");
 
-    let mut out = Vec::new();
     let mut per_query: Vec<u64> = vec![0; engine.query_count()];
 
     let mut reader = LineReader::open(&entry.path, entry.compression, mmap_threshold)?.with_passwords(passwords);
@@ -118,28 +208,24 @@ fn scan_entry(
                 continue;
             }
             per_query[idx] += 1;
-            let result = ScanResult {
-                query: engine.query_raw(idx).to_string(),
-                kind: engine.query_kind(idx),
+            let hit = Hit {
+                query_idx: idx,
                 match_kind: hit.match_kind,
-                source: prowlcat_types::SourceLocation {
-                    path: entry.path.clone(),
-                    archive_entry: member.map(str::to_string).or_else(|| entry.archive_entry.clone()),
-                    line_number: Some(line_no),
-                    byte_offset: offset,
-                },
+                archive_entry: member.map(str::to_string).or_else(|| entry.archive_entry.clone()),
+                line_number: line_no,
+                byte_offset: offset,
                 line_text: String::from_utf8_lossy(line).into_owned(),
-                matched_span: hit.span,
+                span: hit.span,
                 extracted: hit.extracted,
             };
-            // Hits reach a watching UI as they are found, even inside one huge file. A closed
-            // receiver just means nobody is watching any more.
+            // Hits reach a watching UI as they are found, even inside one huge file. A full
+            // channel or a closed receiver just means the UI is not keeping up or has left.
             if let Some(tx) = live {
-                let _ = tx.send(result.clone());
+                let _ = tx.try_send(hit.to_result(engine.query_raw(idx), engine.query_kind(idx), &entry.path));
             }
-            out.push(result);
+            emit(hit);
         }
     })?;
 
-    Ok(out)
+    Ok(())
 }

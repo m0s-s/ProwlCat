@@ -1,6 +1,18 @@
+use std::borrow::Borrow;
+
+use anyhow::Result;
 use prowlcat_types::{MatchKind, QueryKind, ScanResult, ScanSummary};
 
 pub fn print_results(results: &[ScanResult], summary: &ScanSummary) {
+    // Slices cannot fail to arrive.
+    let _ = print_results_iter(results.iter().map(Ok), summary);
+}
+
+pub fn print_results_iter<I, R>(results: I, summary: &ScanSummary) -> Result<()>
+where
+    I: IntoIterator<Item = Result<R>>,
+    R: Borrow<ScanResult>,
+{
     let gb = summary.bytes_scanned as f64 / (1024.0 * 1024.0 * 1024.0);
     println!(
         "ProwlCat | {} targets | {} files | {:.2} GB scanned | {} matches | {:.1}s",
@@ -16,6 +28,8 @@ pub fn print_results(results: &[ScanResult], summary: &ScanSummary) {
     println!();
 
     for r in results {
+        let r = r?;
+        let r = r.borrow();
         let kind_label = kind_str(r.kind);
         let match_label = match_kind_suffix(r.match_kind, &r.extracted);
         println!("[{}] {}{}", kind_label, r.query, match_label);
@@ -24,6 +38,7 @@ pub fn print_results(results: &[ScanResult], summary: &ScanSummary) {
         println!("     {}", truncate_line(&r.line_text, 200));
         println!();
     }
+    Ok(())
 }
 
 fn kind_str(k: QueryKind) -> &'static str {

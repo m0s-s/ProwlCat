@@ -79,6 +79,7 @@ The command line is the scripting interface and is untouched. The interactive UI
 | `PROWLCAT_COLOR` | `truecolor`, `256`, `16` or `none`; overrides detection |
 | `NO_COLOR` | no colours at all |
 | `PROWLCAT_ASCII=1` | plain ASCII glyphs and mascot |
+| `PROWLCAT_RESULT_MEM_MB` | RAM used to hold matches before they are parked in temporary files (default 256); affects memory and speed, never the results |
 | `PROWLCAT_LOG_FILE` | write log lines to this file while the interface is open (they would otherwise draw over it) |
 
 The remembered state is a small JSON file with the last corpus path, index path and your recent targets. Targets can be sensitive: turn it off with `--no-history`, or clear it with `/history clear`.

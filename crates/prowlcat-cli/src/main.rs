@@ -10,8 +10,8 @@ use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use prowlcat_core::{ProgressHandle, ScanConfig, ScanOrchestrator, TargetParser, TypeHint};
-use prowlcat_output::{infer_format, print_results, write_output, OutputFormat};
+use prowlcat_core::{ProgressHandle, ScanConfig, ScanOrchestrator, SortedResults, TargetParser, TypeHint};
+use prowlcat_output::{infer_format, print_results_iter, write_output_iter, OutputFormat};
 use prowlcat_tui::{Start, TuiOptions};
 
 #[derive(Parser)]
@@ -430,25 +430,20 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     config.progress = progress.clone();
 
     let start = Instant::now();
-    let (mut results, mut summary) = if let Some(dir) = &args.index {
+    // Results come back already in the stable, readable order (query, path, line). Large result
+    // sets wait in temporary files instead of RAM, and are written out one at a time.
+    let mut found = if let Some(dir) = &args.index {
         let searcher = prowlcat_index::IndexSearcher::open(dir)?;
-        searcher.search(&queries, config.include_subdomains, config.max_matches_per_query)?
+        let (results, summary) = searcher.search(&queries, config.include_subdomains, config.max_matches_per_query)?;
+        SortedResults::from_vec(results, summary)
     } else {
         let orchestrator = ScanOrchestrator::new(config, queries);
         match &progress {
             Some(handle) => run_with_progress(&orchestrator, handle)?,
-            None => orchestrator.run()?,
+            None => orchestrator.run_sorted()?,
         }
     };
-    summary.elapsed_ms = start.elapsed().as_millis() as u64;
-
-    // Stable sort for readable output
-    results.sort_by(|a, b| {
-        a.query
-            .cmp(&b.query)
-            .then(a.source.path.cmp(&b.source.path))
-            .then(a.source.line_number.cmp(&b.source.line_number))
-    });
+    found.summary_mut().elapsed_ms = start.elapsed().as_millis() as u64;
 
     if let Some(path) = args.output {
         let format = args
@@ -457,12 +452,12 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
             .map(parse_output_format)
             .transpose()?
             .unwrap_or_else(|| infer_format(&path));
-        write_output(&path, format, &results, &summary)?;
+        write_output_iter(&path, format, found.iter(), found.summary())?;
     } else {
-        print_results(&results, &summary);
+        print_results_iter(found.iter(), found.summary())?;
     }
 
-    Ok(if summary.matches > 0 {
+    Ok(if found.summary().matches > 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -511,7 +506,7 @@ fn run_index(args: IndexArgs) -> Result<ExitCode> {
 fn run_with_progress(
     orchestrator: &ScanOrchestrator,
     handle: &ProgressHandle,
-) -> Result<(Vec<prowlcat_core::ScanResult>, prowlcat_core::ScanSummary)> {
+) -> Result<SortedResults> {
     use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
     let bar = ProgressBar::with_draw_target(Some(0), ProgressDrawTarget::stderr_with_hz(10));
@@ -541,7 +536,7 @@ fn run_with_progress(
                 std::thread::sleep(Duration::from_millis(100));
             }
         });
-        let result = orchestrator.run();
+        let result = orchestrator.run_sorted();
         finished.store(true, Ordering::Relaxed);
         result
     });

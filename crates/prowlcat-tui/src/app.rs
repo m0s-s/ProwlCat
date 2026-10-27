@@ -5,10 +5,10 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use prowlcat_core::{ProgressHandle, QueryKind, ScanResult, ScanSummary, TargetParser, TypeHint};
+use prowlcat_core::{ProgressHandle, QueryKind, ScanResult, ScanSummary, SortedResults, TargetParser, TypeHint};
 use prowlcat_index::IndexMeta;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -26,6 +26,8 @@ pub const TICK: Duration = Duration::from_millis(100);
 pub const SPLASH_TICKS: u64 = 20;
 /// Matches kept for the live view while a scan runs.
 const LIVE_KEEP: usize = 400;
+/// Matches the scan may have queued for the live view; beyond this it drops the excess.
+const LIVE_QUEUE: usize = 16_384;
 /// After a successful search, how long Fang gets to pounce before the results open.
 const AUTO_ADVANCE: u64 = 16;
 
@@ -126,7 +128,10 @@ pub struct Group {
 }
 
 pub struct ResultsView {
+    /// The matches shown. All of them unless `full` is set.
     pub all: Vec<ScanResult>,
+    /// Every match, when there were more than the screen keeps; export reads from here.
+    pub full: Option<Box<SortedResults>>,
     pub summary: ScanSummary,
     pub target_label: String,
     /// Every group, most hits first.
@@ -174,6 +179,7 @@ impl ResultsView {
 
         let mut v = Self {
             all,
+            full: None,
             summary,
             target_label,
             groups,
@@ -189,6 +195,17 @@ impl ResultsView {
         };
         v.rebuild();
         v
+    }
+
+    /// Attach the complete result set of a search that found more than the screen holds.
+    pub fn with_full(mut self, full: Option<Box<SortedResults>>) -> Self {
+        self.full = full;
+        self
+    }
+
+    /// Matches found but not shown (they are still exported).
+    pub fn omitted(&self) -> usize {
+        self.full.as_ref().map_or(0, |f| f.len().saturating_sub(self.all.len()))
     }
 
     /// Recompute `view` from the filter, keeping the cursor in range.
@@ -509,6 +526,9 @@ impl App {
             scan.hits_seen += got;
             scan.last_hit_tick = Some(tick);
         }
+        // The live queue can drop hits when the scan outpaces the screen; the scan's own counter
+        // never does.
+        scan.hits_seen = scan.hits_seen.max(scan.progress.matches.load(Ordering::Relaxed));
     }
 
     fn advance_after_search(&mut self) {
@@ -566,7 +586,7 @@ impl App {
         self.drain_live();
         let tick = self.tick;
         match kind {
-            MsgKind::SearchDone { results, summary } => {
+            MsgKind::SearchDone { results, summary, full } => {
                 let Some(scan) = &mut self.scan else { return };
                 let found = summary.matches > 0;
                 let label = scan.targets.join(" ");
@@ -575,7 +595,7 @@ impl App {
                 self.store.push(&label, summary.matches as u64, summary.elapsed_ms);
                 self.store.save();
                 if found {
-                    self.results = Some(ResultsView::new(results, summary, label));
+                    self.results = Some(ResultsView::new(results, summary, label).with_full(full));
                     self.set_mood(Mood::Found);
                 } else {
                     self.results = None;
@@ -879,7 +899,7 @@ impl App {
             [one] => kind_label(one.kind).to_string(),
             many => format!("{} targets", many.len()),
         };
-        let (live_tx, live_rx) = channel();
+        let (live_tx, live_rx) = sync_channel(LIVE_QUEUE);
         let progress = ProgressHandle { live: Some(live_tx), ..ProgressHandle::default() };
         let job = self.next_job();
         let spec = SearchSpec {
@@ -1037,9 +1057,13 @@ impl App {
             return;
         };
         let format = prowlcat_output::infer_format(path);
-        match prowlcat_output::write_output(path, format, &view.all, &view.summary) {
-            Ok(()) => {
-                let n = view.all.len();
+        // A search with more matches than the screen holds exports from the complete set.
+        let written = match &view.full {
+            Some(full) => prowlcat_output::write_output_iter(path, format, full.iter(), &view.summary).map(|()| full.len()),
+            None => prowlcat_output::write_output(path, format, &view.all, &view.summary).map(|()| view.all.len()),
+        };
+        match written {
+            Ok(n) => {
                 self.notify(NoticeKind::Ok, format!("exported {n} matches to {}", path.display()));
             }
             Err(e) => self.notify(NoticeKind::Error, format!("export failed: {e:#}")),

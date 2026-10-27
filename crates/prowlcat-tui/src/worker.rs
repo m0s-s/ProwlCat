@@ -7,9 +7,13 @@ use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use anyhow::Result;
-use prowlcat_core::{ProgressHandle, Query, ScanConfig, ScanOrchestrator, ScanResult, ScanSummary};
+use prowlcat_core::{ProgressHandle, Query, ScanConfig, ScanOrchestrator, ScanResult, ScanSummary, SortedResults};
 use prowlcat_index::{IndexBuildConfig, IndexMeta, IndexSearcher};
 use prowlcat_source::{CompressionKind, SourceEnumerator};
+
+/// How many matches the results screen holds in memory. A search that finds more still counts
+/// and exports all of them; the screen shows the first ones, in the usual order.
+pub const RESULTS_KEPT: usize = 250_000;
 
 #[derive(Debug)]
 pub struct Msg {
@@ -19,7 +23,8 @@ pub struct Msg {
 
 #[derive(Debug)]
 pub enum MsgKind {
-    SearchDone { results: Vec<ScanResult>, summary: ScanSummary },
+    /// `results` is at most [`RESULTS_KEPT`] matches; `full` holds all of them when there are more.
+    SearchDone { results: Vec<ScanResult>, summary: ScanSummary, full: Option<Box<SortedResults>> },
     Stats(CorpusStats),
     IndexBuilt { meta: IndexMeta, dir: PathBuf, elapsed_ms: u64 },
     Failed(String),
@@ -71,24 +76,26 @@ fn spawn(name: &str, job: u64, tx: Sender<Msg>, work: impl FnOnce() -> Result<Ms
 pub fn spawn_search(job: u64, spec: SearchSpec, tx: Sender<Msg>) {
     spawn("scan", job, tx, move || {
         let start = Instant::now();
-        let (mut results, mut summary) = run_search(spec)?;
-        summary.elapsed_ms = start.elapsed().as_millis() as u64;
-        // Same stable order as the command line, so results read the same in both modes.
-        results.sort_by(|a, b| {
-            a.query
-                .cmp(&b.query)
-                .then(a.source.path.cmp(&b.source.path))
-                .then(a.source.line_number.cmp(&b.source.line_number))
-        });
-        Ok(MsgKind::SearchDone { results, summary })
+        // Already in the same stable order as the command line, so results read the same in both
+        // modes. Matches beyond the memory budget wait in temporary files.
+        let mut sorted = run_search(spec)?;
+        sorted.summary_mut().elapsed_ms = start.elapsed().as_millis() as u64;
+        let mut results = Vec::new();
+        for r in sorted.iter().take(RESULTS_KEPT) {
+            results.push(r?);
+        }
+        let summary = sorted.summary().clone();
+        let full = (sorted.len() > results.len()).then(|| Box::new(sorted));
+        Ok(MsgKind::SearchDone { results, summary, full })
     });
 }
 
-fn run_search(spec: SearchSpec) -> Result<(Vec<ScanResult>, ScanSummary)> {
+fn run_search(spec: SearchSpec) -> Result<SortedResults> {
     let defaults = ScanConfig::default();
     if let Some(dir) = &spec.index {
         let searcher = IndexSearcher::open(dir)?;
-        return searcher.search(&spec.queries, defaults.include_subdomains, spec.max_matches);
+        let (results, summary) = searcher.search(&spec.queries, defaults.include_subdomains, spec.max_matches)?;
+        return Ok(SortedResults::from_vec(results, summary));
     }
     let config = ScanConfig {
         paths: spec.paths,
@@ -99,7 +106,7 @@ fn run_search(spec: SearchSpec) -> Result<(Vec<ScanResult>, ScanSummary)> {
         progress: Some(spec.progress),
         ..defaults
     };
-    ScanOrchestrator::new(config, spec.queries).run()
+    ScanOrchestrator::new(config, spec.queries).run_sorted()
 }
 
 pub fn spawn_stats(job: u64, paths: Vec<PathBuf>, recursive: bool, tx: Sender<Msg>) {
@@ -185,7 +192,8 @@ mod tests {
         spawn_search(7, spec(vec![dir.path().to_path_buf()], &["bob@example.com", "alice@example.com"]), tx);
         let msg = recv(&rx);
         assert_eq!(msg.job, 7);
-        let MsgKind::SearchDone { results, summary } = msg.kind else { panic!("expected SearchDone, got {:?}", msg.kind) };
+        let MsgKind::SearchDone { results, summary, full } = msg.kind else { panic!("expected SearchDone, got {:?}", msg.kind) };
+        assert!(full.is_none(), "a small result set is held entirely in memory");
         assert_eq!(summary.matches, 2);
         assert_eq!(results[0].query, "alice@example.com", "sorted by query");
     }
@@ -193,7 +201,7 @@ mod tests {
     #[test]
     fn live_matches_are_streamed_while_the_search_runs() {
         let dir = corpus();
-        let (live_tx, live_rx) = channel();
+        let (live_tx, live_rx) = std::sync::mpsc::sync_channel(64);
         let mut s = spec(vec![dir.path().to_path_buf()], &["alice@example.com"]);
         s.progress.live = Some(live_tx);
         let (tx, rx) = channel();

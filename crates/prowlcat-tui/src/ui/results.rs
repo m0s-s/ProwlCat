@@ -72,6 +72,12 @@ fn draw_head(f: &mut Frame, app: &App, view: &ResultsView, area: Rect) {
     if s.errors > 0 {
         spans.push(Span::styled(format!("   {} files failed", s.errors), t.red()));
     }
+    if view.omitted() > 0 {
+        spans.push(Span::styled(
+            format!("   first {} shown, export saves all", thousands(view.all.len() as u64)),
+            t.amber(),
+        ));
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 
     let filter_text = match &view.filtering {

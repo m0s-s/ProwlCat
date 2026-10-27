@@ -1,9 +1,14 @@
+use std::borrow::Borrow;
 use std::path::Path;
 
 use anyhow::Result;
 use prowlcat_types::ScanResult;
 
-pub fn write_csv(path: &Path, results: &[ScanResult]) -> Result<()> {
+pub fn write_csv<I, R>(path: &Path, results: I) -> Result<()>
+where
+    I: IntoIterator<Item = Result<R>>,
+    R: Borrow<ScanResult>,
+{
     let mut wtr = csv::Writer::from_path(path)?;
     wtr.write_record([
         "query",
@@ -16,6 +21,8 @@ pub fn write_csv(path: &Path, results: &[ScanResult]) -> Result<()> {
     ])?;
 
     for r in results {
+        let r = r?;
+        let r = r.borrow();
         wtr.write_record([
             &r.query,
             &format!("{:?}", r.kind),

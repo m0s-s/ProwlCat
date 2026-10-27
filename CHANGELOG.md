@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Memory: searches with a very large number of matches no longer fill the RAM. Matches are kept in a compact form and, past a budget (256 MiB, `PROWLCAT_RESULT_MEM_MB`), sorted and parked in temporary files that are merged back in order. Results and their order are unchanged; NDJSON, CSV and the table are byte for byte identical to 0.2.0. All formats are now written one result at a time.
+- JSON export (`-o file.json`) is now compact, on one line, instead of indented. The content is the same; pipe it through `jq .` to read it. Object keys follow the field order (as in NDJSON) rather than alphabetical order.
+- The interface shows the first 250,000 matches and still counts, and exports, all of them.
+- Core: `ScanOrchestrator::run_sorted` and `SortedResults` (bounded memory, repeatable iteration). `ProgressHandle::live` is now a bounded `SyncSender` and drops hits when the receiver falls behind. `prowlcat-output` gains `write_output_iter` and `print_results_iter`.
+
 ## 0.2.0
 
 - Interactive terminal UI (new `prowlcat-tui` crate, built on ratatui): home screen with recent searches and a command palette, live scan view with streaming hits, results explorer with filter, export and copy, and a corpus/index screen. It opens when `prowlcat` is run with no subcommand in a terminal.

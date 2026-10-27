@@ -10,3 +10,6 @@ serde.workspace = true
 serde_json.workspace = true
 csv.workspace = true
 prowlcat-types = { path = "../prowlcat-types" }
+
+[dev-dependencies]
+tempfile = "3"

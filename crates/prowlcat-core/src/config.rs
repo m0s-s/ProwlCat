@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
 use prowlcat_types::ScanResult;
@@ -19,9 +19,10 @@ pub struct ProgressHandle {
     /// Set to `true` to ask the scan to stop. Files not yet started are skipped and running
     /// files stop matching within a few hundred lines; the scan then returns what it has.
     pub cancel: Arc<AtomicBool>,
-    /// When set, every match is also sent here as soon as its file has been scanned, so a UI
-    /// can show hits live. The final result list is unaffected.
-    pub live: Option<Sender<ScanResult>>,
+    /// When set, matches are also sent here as they are found, so a UI can show hits live. The
+    /// channel is bounded: if the receiver falls behind, the excess is not sent (use `matches`
+    /// for the count). The final result list is unaffected.
+    pub live: Option<SyncSender<ScanResult>>,
 }
 
 /// Runtime configuration for a scan job.
@@ -39,6 +40,20 @@ pub struct ScanConfig {
     pub passwords: Vec<String>,
     /// Optional live progress counters.
     pub progress: Option<ProgressHandle>,
+    /// RAM, in MiB, that [`ScanOrchestrator::run_sorted`](crate::ScanOrchestrator::run_sorted)
+    /// may use to hold matches before moving them to a temporary file. The results are the
+    /// same whatever the value; `0` spills as early as possible. `PROWLCAT_RESULT_MEM_MB`
+    /// sets the default.
+    pub result_memory_mb: u64,
+}
+
+const DEFAULT_RESULT_MEMORY_MB: u64 = 256;
+
+fn default_result_memory_mb() -> u64 {
+    std::env::var("PROWLCAT_RESULT_MEM_MB")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_RESULT_MEMORY_MB)
 }
 
 impl Default for ScanConfig {
@@ -56,6 +71,7 @@ impl Default for ScanConfig {
             hide_secrets: false,
             passwords: Vec::new(),
             progress: None,
+            result_memory_mb: default_result_memory_mb(),
         }
     }
 }

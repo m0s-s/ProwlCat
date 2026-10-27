@@ -153,7 +153,10 @@ The output directory must not exist or be empty. See §9.
 1. **No line-count pre-scan** — progress counts raw on-disk bytes consumed (compressed bytes for `.gz`/`.zst`/archives) against total file size, shown as a bar with throughput and ETA on an interactive stderr. Disabled by `--no-progress` or when stderr is not a terminal.
 2. **8 MiB reusable buffer** for plaintext; mmap at or above `mmap_threshold_mb` (M2).
 3. **One Rayon task per file**; sequential scan inside each file.
-4. **Bounded match channel** for streaming NDJSON export.
+4. **Bounded memory for results** (`ScanOrchestrator::run_sorted`, `prowlcat-core/src/sorted.rs`). Matches are not kept as `ScanResult`s: each worker hands over compact hits (no repeated path or query text) in batches of about 2 MiB. Once the collector holds more than `result_memory_mb` (256 by default, `PROWLCAT_RESULT_MEM_MB`), it sorts the batch and writes it to an anonymous temporary file, a *run*. Every hit carries a key `(query rank, path rank, line, file index, sequence)` that reproduces the order of the old "collect, then stable sort by query, path, line". Reading back is a k-way merge of the in-memory tail and the runs, so RAM is the budget plus a small buffer per run, whatever the match count; the limit becomes free disk space. A file that fails after handing over part of its hits has them ignored, as a failed file always contributed nothing.
+5. **Streaming output.** The writers in `prowlcat-output` take iterators, so compact JSON, NDJSON, CSV and the table are written one result at a time. The interface keeps the first 250,000 matches for the results screen and the complete `SortedResults` for export. The live view's channel is bounded and drops hits when the screen falls behind; the scan's own counter stays exact.
+
+Not covered yet: a single line with no newline is read whole into memory, and `IndexSearcher::search` still builds its result list in memory.
 
 ---
 

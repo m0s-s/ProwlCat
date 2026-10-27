@@ -295,7 +295,7 @@ fn live_sink_receives_every_match() {
     std::fs::write(dir.join("a.txt"), SAMPLE).unwrap();
     std::fs::write(dir.join("b.txt"), SAMPLE).unwrap();
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1024);
     let handle = ProgressHandle { live: Some(tx), ..ProgressHandle::default() };
     let queries = TargetParser::new(TypeHint::Email)
         .parse_many(["alice@example.com", "bob@example.com"])
@@ -334,6 +334,107 @@ fn cancel_flag_stops_the_scan() {
     let (results, summary) = ScanOrchestrator::new(config, queries).run().unwrap();
     assert!(results.is_empty(), "a pre-cancelled scan finds nothing");
     assert_eq!(summary.errors, 0, "cancelling is not an error");
+}
+
+// ---- bounded-memory, ordered results (run_sorted) ----
+
+/// A corpus of many formats and files, so ordering has real work to do.
+fn mixed_corpus(tag: &str) -> PathBuf {
+    let dir = scratch_dir(tag);
+    for i in 0..12 {
+        let body = format!("{SAMPLE}noise {i}\n{}", SAMPLE.repeat(i % 4 + 1));
+        std::fs::write(dir.join(format!("f{:02}.txt", 11 - i)), body).unwrap();
+    }
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(SAMPLE.repeat(5).as_bytes()).unwrap();
+    std::fs::write(dir.join("g.txt.gz"), enc.finish().unwrap()).unwrap();
+    std::fs::write(dir.join("t.tar"), tar_bytes()).unwrap();
+    let mut w = zip::ZipWriter::new(std::fs::File::create(dir.join("z.zip")).unwrap());
+    for name in ["m1.txt", "m2.txt"] {
+        w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(SAMPLE.as_bytes()).unwrap();
+    }
+    w.finish().unwrap();
+    dir
+}
+
+fn config_for(dir: &std::path::Path, max_matches: u64, memory_mb: u64) -> ScanConfig {
+    ScanConfig {
+        paths: vec![dir.to_path_buf()],
+        threads: 4,
+        max_matches_per_query: max_matches,
+        result_memory_mb: memory_mb,
+        ..ScanConfig::default()
+    }
+}
+
+fn queries() -> Vec<prowlcat_types::Query> {
+    TargetParser::new(TypeHint::Auto)
+        .parse_many(["bob@example.com", "alice@example.com", "example.com"])
+        .unwrap()
+}
+
+fn as_json(results: &[prowlcat_types::ScanResult]) -> Vec<String> {
+    results.iter().map(|r| serde_json::to_string(r).unwrap()).collect()
+}
+
+#[test]
+fn sorted_run_gives_exactly_the_stable_sorted_list() {
+    let dir = mixed_corpus("sorted-eq");
+    for max in [0u64, 2] {
+        let (mut expected, summary) = ScanOrchestrator::new(config_for(&dir, max, 256), queries()).run().unwrap();
+        expected.sort_by(|a, b| {
+            a.query
+                .cmp(&b.query)
+                .then(a.source.path.cmp(&b.source.path))
+                .then(a.source.line_number.cmp(&b.source.line_number))
+        });
+        assert!(expected.len() > 20, "the corpus must produce plenty of matches");
+
+        // 256 MiB keeps everything in memory; 0 pushes every batch through temporary files.
+        for memory_mb in [256u64, 0] {
+            let sorted = ScanOrchestrator::new(config_for(&dir, max, memory_mb), queries()).run_sorted().unwrap();
+            let got: Vec<_> = sorted.iter().collect::<Result<_, _>>().unwrap();
+            assert_eq!(as_json(&got), as_json(&expected), "max {max}, memory {memory_mb} MiB");
+            assert_eq!(sorted.summary().matches, summary.matches);
+            assert_eq!(sorted.summary().files_scanned, summary.files_scanned);
+            assert_eq!(sorted.summary().bytes_scanned, summary.bytes_scanned);
+            assert_eq!(sorted.spilled_runs() > 0, memory_mb == 0, "spill only when the budget is exhausted");
+        }
+    }
+}
+
+#[test]
+fn sorted_results_can_be_read_more_than_once() {
+    let dir = mixed_corpus("sorted-twice");
+    let sorted = ScanOrchestrator::new(config_for(&dir, 0, 0), queries()).run_sorted().unwrap();
+    let first: Vec<_> = sorted.iter().collect::<Result<_, _>>().unwrap();
+    let second: Vec<_> = sorted.iter().collect::<Result<_, _>>().unwrap();
+    assert_eq!(as_json(&first), as_json(&second));
+    assert_eq!(first.len(), sorted.len());
+}
+
+#[test]
+fn sorted_run_reports_progress_and_honours_cancel() {
+    use prowlcat_core::ProgressHandle;
+    use std::sync::atomic::Ordering;
+
+    let dir = mixed_corpus("sorted-progress");
+    let handle = ProgressHandle::default();
+    let mut config = config_for(&dir, 0, 256);
+    config.progress = Some(handle.clone());
+    let sorted = ScanOrchestrator::new(config, queries()).run_sorted().unwrap();
+    assert_eq!(handle.matches.load(Ordering::Relaxed), sorted.len() as u64);
+    assert_eq!(handle.done.load(Ordering::Relaxed), handle.total.load(Ordering::Relaxed));
+    assert_eq!(handle.files_done.load(Ordering::Relaxed), sorted.summary().files_scanned as u64);
+
+    let cancelled = ProgressHandle::default();
+    cancelled.cancel.store(true, Ordering::Relaxed);
+    let mut config = config_for(&dir, 0, 256);
+    config.progress = Some(cancelled);
+    let sorted = ScanOrchestrator::new(config, queries()).run_sorted().unwrap();
+    assert!(sorted.is_empty());
+    assert_eq!(sorted.summary().errors, 0);
 }
 
 #[test]
