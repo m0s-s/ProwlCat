@@ -45,6 +45,7 @@ pub struct CorpusStats {
     /// `.xz` and `.tar.xz`.
     pub xz: usize,
     pub sevenz: usize,
+    pub rar: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +130,7 @@ pub fn spawn_stats(job: u64, paths: Vec<PathBuf>, recursive: bool, tx: Sender<Ms
             bzip2: count(|k| matches!(k, CompressionKind::Bzip2 | CompressionKind::TarBz2)),
             xz: count(|k| matches!(k, CompressionKind::Xz | CompressionKind::TarXz)),
             sevenz: count(|k| k == CompressionKind::SevenZ),
+            rar: count(|k| k == CompressionKind::Rar),
         }))
     });
 }

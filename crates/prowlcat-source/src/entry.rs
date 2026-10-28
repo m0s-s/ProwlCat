@@ -17,6 +17,8 @@ pub enum CompressionKind {
     TarXz,
     TarZst,
     SevenZ,
+    /// Read through an external program (see `prowlcat-decode`).
+    Rar,
 }
 
 impl CompressionKind {
@@ -24,7 +26,7 @@ impl CompressionKind {
     pub fn is_archive(self) -> bool {
         matches!(
             self,
-            Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::TarZst | Self::Zip | Self::SevenZ
+            Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::TarZst | Self::Zip | Self::SevenZ | Self::Rar
         )
     }
 }
@@ -80,6 +82,9 @@ pub fn detect_compression(path: &Path) -> CompressionKind {
     if ends(&[".7z"]) {
         return CompressionKind::SevenZ;
     }
+    if ends(&[".rar"]) {
+        return CompressionKind::Rar;
+    }
     if ends(&[".zst", ".zstd"]) {
         return CompressionKind::Zstd;
     }
@@ -110,6 +115,9 @@ pub fn detect_compression(path: &Path) -> CompressionKind {
         }
         if head.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]) {
             return CompressionKind::SevenZ;
+        }
+        if head.starts_with(b"Rar!\x1a\x07") {
+            return CompressionKind::Rar;
         }
         if head.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
             return CompressionKind::Xz;

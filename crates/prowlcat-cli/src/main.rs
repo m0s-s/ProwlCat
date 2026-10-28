@@ -333,6 +333,15 @@ struct StatsArgs {
 
     #[command(flatten)]
     walk: Walk,
+
+    /// Also open every file, without searching it, and report which ones a search could not read
+    /// (encrypted without a password that fits, a RAR with no program to read it, damaged, or not
+    /// the format its name says)
+    #[arg(long, help_heading = "Coverage")]
+    check: bool,
+
+    #[command(flatten)]
+    archives: Archives,
 }
 
 fn main() -> ExitCode {
@@ -367,7 +376,10 @@ fn run() -> Result<ExitCode> {
             match cli.command {
                 Some(Commands::Search(args)) => run_search(args),
                 Some(Commands::Index(args)) => run_index(args),
-                Some(Commands::Stats(args)) => commands::stats::run(args.paths, args.walk.on()),
+                Some(Commands::Stats(args)) => {
+                    let passwords = args.archives.load()?;
+                    commands::stats::run(args.paths, args.walk.on(), args.check, &passwords)
+                }
                 Some(Commands::Tui(_)) | None => bail!("internal error: no classic command to run"),
             }
         }

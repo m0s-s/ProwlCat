@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/m0s-s/ProwlCat)](https://github.com/m0s-s/ProwlCat/releases)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
-**A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.bz2`, `.xz`, `.zst`, `.zip`, `.7z`, `.tar` and its compressed forms) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
+**A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.bz2`, `.xz`, `.zst`, `.zip`, `.7z`, `.rar`, `.tar` and its compressed forms) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
 
 <p align="center">
   <img src="assets/screenshots/tui-home.png" alt="ProwlCat interactive interface: the home screen with Fang, the mascot" width="860">
@@ -237,6 +237,27 @@ ProwlCat stats
 
 `bzip2`, `xz` and `zstd` count the files of that kind, tarballs included (`.tar.bz2`, `.tar.xz`, `.tar.zst`); `tar/tar.gz` counts `.tar` and `.tar.gz`.
 
+`stats --check` also **opens every file, without searching it,** and says which ones a search could not read. It takes `--password` and `--password-file` like `search`:
+
+```console
+$ prowlcat stats -p ./breaches --check --password-file passwords.txt
+…
+Readability (every file is opened and its start read; nothing is searched)
+  can be read:           412 of 415
+  need a password:       2
+  need a RAR program:    0
+  cannot be read:        1
+
+Need a password (--password or --password-file):
+  ./breaches/clients-2021.zip
+  ./breaches/old.7z
+
+Cannot be read (damaged, or a format that is not what its name says):
+  ./breaches/part3.txt.gz: invalid gzip header
+```
+
+It reads the start of each file, so damage further inside a file is not found. The exit code is 0 either way.
+
 ### Examples
 
 ```bash
@@ -319,8 +340,11 @@ It does not match longer names such as `example.community` or `notexample.com`.
 | `.gz`, `.bz2`, `.xz`, `.zst` | streamed; files made of several streams (`pbzip2`, `cat a.xz b.xz`) are read to the end |
 | `.tar`, `.tar.gz`, `.tar.bz2` (`.tbz2`), `.tar.xz` (`.txz`), `.tar.zst` | each entry is scanned; matches show the entry name |
 | `.zip`, `.7z` | each member is scanned; encrypted archives are opened with the passwords you provide (`--password`, `--password-file`), tried in order |
+| `.rar` | each member is scanned, through **7-Zip** run as a separate program (see below); needs `7zz` or `7z` installed |
 
-The format is recognised from the name and, for a file with another name (`dump.bin`), from its first bytes (gzip, bzip2, xz, zstd, zip, 7z). A `.7z` or `.zip` that cannot be opened (missing or wrong password, damage) counts as a failed file: the table says `warnings: N files failed` and the log names it. `.rar` is not read yet.
+The format is recognised from the name and, for a file with another name (`dump.bin`), from its first bytes (gzip, bzip2, xz, zstd, zip, 7z). A `.7z`, `.zip` or `.rar` that cannot be opened (missing or wrong password, damage, no program for RAR) counts as a failed file: the table says `warnings: N files failed` and the log names it.
+
+**RAR archives.** ProwlCat contains no RAR decoder, so it does not carry that code or its license terms. For `.rar` it runs 7-Zip, installed by you, as a separate program: it lists the archive, then reads every member in one pass and cuts the stream at the listed sizes, so members keep their names and nothing is written to disk. It looks for `7zz` and then `7z` in `PATH`; `PROWLCAT_RAR_TOOL=/path/to/7zz` picks one. Install it with your package manager (`pacman -S 7zip`, `apt install 7zip`, `brew install sevenzip`). Without it, a `.rar` is reported as a failed file and `stats --check` says so. A password goes to 7-Zip on its command line, where other users of the machine can see it for as long as it runs, as with `--password` itself.
 
 Matches are always reported in a stable order: by target, then file path, then line number.
 
@@ -452,6 +476,7 @@ The index covers emails, domains and IP addresses (including CIDR ranges). Plain
 | `PROWLCAT_TMP_DIR` | directory for those temporary files; by default the system temp directory, or `/var/tmp` / `~/.cache/prowlcat` when that is a RAM-backed `tmpfs` |
 | `PROWLCAT_MAX_LINE_BYTES` | default for `--max-line-bytes` (also used by the interactive interface) |
 | `PROWLCAT_SNIPPET` | default for `--snippet` (also used by the interactive interface) |
+| `PROWLCAT_RAR_TOOL` | path of the program (`7zz`, `7z`) that reads `.rar` archives, instead of looking in `PATH` |
 | `PROWLCAT_LOG_FILE` | write log lines to this file while the interface is open (they would otherwise draw over it) |
 
 ## Development

@@ -35,9 +35,14 @@ fn run_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Out {
         .env_remove("PROWLCAT_LOG_FILE")
         .env_remove("PROWLCAT_RESULT_MEM_MB")
         .env_remove("PROWLCAT_TMP_DIR")
+        .env_remove("PROWLCAT_RAR_TOOL")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // The RAR tests use a program only if the one running them names it.
+    if let Some(tool) = std::env::var_os("PROWLCAT_E2E_RAR_TOOL") {
+        cmd.env("PROWLCAT_RAR_TOOL", tool);
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -592,6 +597,163 @@ fn an_index_covers_the_new_containers() {
         assert_eq!((code, rows.len()), (0, 1), "{target}");
         assert!(path_of(&rows[0]).ends_with(file), "{:?}", rows[0]);
     }
+}
+
+// ---- RAR, through an external program ----
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut c = flate2::Crc::new();
+    c.update(data);
+    c.sum()
+}
+
+/// A RAR 4 archive whose members are stored, not compressed: the format is simple enough to
+/// write here, and `unrar t` accepts what this produces.
+fn rar4_stored(members: &[(&str, &str)]) -> Vec<u8> {
+    fn block(head_type: u8, flags: u16, add_size: Option<u32>, body: &[u8]) -> Vec<u8> {
+        let size = 7 + add_size.map_or(0, |_| 4) + body.len();
+        let mut b = vec![head_type];
+        b.extend_from_slice(&flags.to_le_bytes());
+        b.extend_from_slice(&(size as u16).to_le_bytes());
+        if let Some(n) = add_size {
+            b.extend_from_slice(&n.to_le_bytes());
+        }
+        b.extend_from_slice(body);
+        let mut out = ((crc32(&b) & 0xFFFF) as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(&b);
+        out
+    }
+    let mut out = b"Rar!\x1a\x07\x00".to_vec();
+    out.extend(block(0x73, 0, None, &[0; 6]));
+    for (name, data) in members {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes()); // unpacked size
+        body.push(3); // host OS: Unix
+        body.extend_from_slice(&crc32(data.as_bytes()).to_le_bytes());
+        body.extend_from_slice(&0x5A21_0000u32.to_le_bytes()); // time
+        body.extend_from_slice(&[29, 0x30]); // version, method: store
+        body.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        body.extend_from_slice(&(0o100644u32 << 16).to_le_bytes());
+        body.extend_from_slice(name.as_bytes());
+        out.extend(block(0x74, 0x8000, Some(data.len() as u32), &body));
+        out.extend_from_slice(data.as_bytes());
+    }
+    out.extend_from_slice(&[0xC4, 0x3D, 0x7B, 0x00, 0x40, 0x07, 0x00]); // end of archive
+    out
+}
+
+fn rar_corpus() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let rar = rar4_stored(&[
+        ("a/one.txt", "rarone@example.com:p\n"),
+        // No newline at the end: the next member's first line must not be glued to it.
+        ("two.txt", "rartwo@example.com:p\nsecond line\nrarlast@example.com:p"),
+        ("three.txt", "rarthree@example.com:p\n"),
+    ]);
+    fs::write(dir.path().join("dump.rar"), &rar).unwrap();
+    fs::write(dir.path().join("renamed.bin"), &rar).unwrap();
+    dir
+}
+
+/// True when this machine has a program that reads RAR (`unrar` or 7-Zip); the tests that need
+/// one say so and pass otherwise.
+fn have_rar_program(d: &Path) -> bool {
+    let o = run(d, &["search", "rarone@example.com", "-p", "dump.rar", "--no-progress"]);
+    let missing = o.stdout.contains("no program to read RAR") || o.stderr.contains("no program to read RAR");
+    if missing {
+        eprintln!("skipped: no RAR program (7zz or 7z, or PROWLCAT_RAR_TOOL) installed");
+    }
+    !missing
+}
+
+#[test]
+fn rar_archives_are_read_member_by_member() {
+    let c = rar_corpus();
+    let d = c.path();
+    if !have_rar_program(d) {
+        return;
+    }
+    let cases = [
+        ("rarone@example.com", "dump.rar", "a/one.txt"),
+        ("rartwo@example.com", "dump.rar", "two.txt"),
+        ("rarlast@example.com", "dump.rar", "two.txt"),
+        ("rarthree@example.com", "dump.rar", "three.txt"),
+        ("rarthree@example.com", "renamed.bin", "three.txt"), // recognised from its first bytes
+    ];
+    for (target, file, member) in cases {
+        let (code, rows) = search(d, &[target, "-p", file]);
+        assert_eq!((code, rows.len()), (0, 1), "{target} in {file}");
+        assert_eq!(rows[0]["source"]["archive_entry"], member, "{target} in {file}");
+        assert!(rows[0]["line_text"].as_str().unwrap().starts_with(&target[..7]), "lines are not glued together: {:?}", rows[0]["line_text"]);
+    }
+    let (_, rows) = search(d, &["second line", "-t", "text", "-p", "dump.rar"]);
+    assert_eq!((rows.len(), rows[0]["source"]["line_number"].as_u64()), (1, Some(1)), "line numbers restart in each member");
+}
+
+#[test]
+fn a_rar_that_cannot_be_read_is_reported_not_skipped() {
+    let c = rar_corpus();
+    let d = c.path();
+    let o = run_env(
+        d,
+        &["search", "rarone@example.com", "-p", "dump.rar", "--no-progress"],
+        &[("PROWLCAT_RAR_TOOL", "/definitely/not/installed/unrar")],
+    );
+    assert_eq!(o.code, 1);
+    assert!(o.stdout.contains("warnings: 1 files failed"), "{}", o.stdout);
+}
+
+#[test]
+fn stats_check_reports_what_a_search_could_not_read() {
+    let c = corpus();
+    let d = c.path();
+    let more = more_containers();
+    fs::copy(more.path().join("locked.7z"), d.join("locked.7z")).unwrap();
+    fs::copy(more.path().join("one.txt.xz"), d.join("fine.txt.xz")).unwrap();
+    fs::write(d.join("broken.txt.gz"), b"this is not gzip data at all, just text pretending").unwrap();
+    fs::write(d.join("broken.7z"), b"7z but not really, a few bytes only").unwrap();
+
+    let check = |extra: &[&str]| run(d, &[&["stats", "-p", ".", "--check"][..], extra].concat());
+    let o = check(&[]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    for want in ["need a password:       2", "cannot be read:        2"] {
+        assert!(o.stdout.contains(want), "missing {want:?} in\n{}", o.stdout);
+    }
+    // Both encrypted archives are named, and so are the two that are damaged.
+    for name in ["locked.zip", "locked.7z", "broken.txt.gz", "broken.7z"] {
+        assert!(o.stdout.contains(name), "{name} not named in\n{}", o.stdout);
+    }
+    assert!(!o.stdout.contains("fine.txt.xz"), "a readable file is not listed");
+
+    let o = check(&["--password-file", "passwords.txt"]);
+    assert!(o.stdout.contains("need a password:       0"), "{}", o.stdout);
+    assert!(o.stdout.contains("cannot be read:        2"), "{}", o.stdout);
+
+    // Without --check stats is what it was.
+    assert!(!run(d, &["stats", "-p", "."]).stdout.contains("Readability"));
+}
+
+#[test]
+fn stats_check_says_when_there_is_no_program_for_rar() {
+    let c = rar_corpus();
+    let d = c.path();
+    let nothing = tempfile::tempdir().unwrap();
+    let o = run_env(d, &["stats", "-p", "dump.rar", "--check"], &[("PATH", nothing.path().to_str().unwrap()), ("PROWLCAT_RAR_TOOL", "")]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(o.stdout.contains("need a RAR program:    1"), "{}", o.stdout);
+    assert!(o.stdout.contains("dump.rar"), "{}", o.stdout);
+    // And with a program, the same archive is fine.
+    if have_rar_program(d) {
+        let o = run(d, &["stats", "-p", "dump.rar", "--check"]);
+        assert!(o.stdout.contains("can be read:           1 of 1"), "{}", o.stdout);
+    }
+}
+
+#[test]
+fn stats_counts_rar() {
+    let c = rar_corpus();
+    let o = run(c.path(), &["stats", "-p", "."]);
+    assert!(o.stdout.contains("rar:        2"), "{}", o.stdout);
 }
 
 #[test]

@@ -67,7 +67,7 @@ fn draw_corpus(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::raw(""));
             lines.push(fact(app, "files", thousands(s.files as u64)));
             lines.push(fact(app, "size", human_bytes(s.bytes)));
-            lines.push(fact(app, "archives", (s.gzip + s.zstd + s.tar + s.zip + s.bzip2 + s.xz + s.sevenz).to_string()));
+            lines.push(fact(app, "archives", (s.gzip + s.zstd + s.tar + s.zip + s.bzip2 + s.xz + s.sevenz + s.rar).to_string()));
             lines.extend(composition(app, s, inner.width as usize));
         }
         None if app.corpus.stats_job.is_some() => {
@@ -95,7 +95,7 @@ fn composition(app: &App, s: &CorpusStats, width: usize) -> Vec<Line<'static>> {
         ("zst", s.zstd, t.green),
         ("tar", s.tar, t.red),
         ("zip", s.zip, t.dim),
-        ("bz2 xz 7z", s.bzip2 + s.xz + s.sevenz, t.text),
+        ("bz2 xz 7z rar", s.bzip2 + s.xz + s.sevenz + s.rar, t.text),
     ];
     let total: usize = parts.iter().map(|p| p.1).sum();
     if total == 0 || width < 10 {

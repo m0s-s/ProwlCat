@@ -1,6 +1,7 @@
 //! Streaming line readers for plaintext and compressed sources.
 
 mod plain;
+mod rar;
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use tracing::warn;
 
 pub use plain::PlainReader;
 use plain::{read_lines, Counted};
+pub use rar::rar_tool_available;
 pub use plain::{MIN_MAX_LINE, PIECE_OVERLAP};
 
 /// Line reader over plaintext, compressed streams, and tar/zip archives.
@@ -112,6 +114,7 @@ impl LineReader {
             CompressionKind::TarXz => scan_tar(liblzma::read::XzDecoder::new_multi_decoder(file()?), &self.path, cap, f),
             CompressionKind::TarZst => scan_tar(zstd::stream::read::Decoder::new(file()?)?, &self.path, cap, f),
             CompressionKind::SevenZ => scan_7z(&file, &self.path, &self.passwords, cap, f),
+            CompressionKind::Rar => rar::scan_rar(&self.path, &self.passwords, cap, f),
             CompressionKind::Zip => scan_zip(file()?, &self.path, &self.passwords, cap, f),
         };
         if let Some(g) = &self.progress {
@@ -269,4 +272,103 @@ fn scan_7z<R: Read + Seek>(
         path.display(),
         last.map_or_else(|| "unreadable".to_string(), |e| e.to_string())
     ))
+}
+
+/// What opening a file, without searching it, showed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// It opens, and its start decodes.
+    Readable,
+    /// An archive with encrypted members that none of the supplied passwords opens.
+    NeedsPassword,
+    /// A RAR archive and no program to read it (7-Zip) is installed.
+    NoTool,
+    /// It could not be opened or its start does not decode.
+    Unreadable(String),
+}
+
+/// Open `path` as `compression` says it is and read the start of it, to tell whether a search
+/// would be able to read it. Damage further inside a file is not found this way.
+pub fn probe(path: &Path, compression: CompressionKind, passwords: &[String]) -> Probe {
+    match probe_inner(path, compression, passwords) {
+        Ok(p) => p,
+        Err(e) => Probe::Unreadable(format!("{e:#}")),
+    }
+}
+
+fn read_start(r: impl Read) -> Result<()> {
+    let mut start = Vec::new();
+    r.take(4096).read_to_end(&mut start)?;
+    Ok(())
+}
+
+fn first_tar_entry(r: impl Read) -> Result<()> {
+    let mut archive = tar::Archive::new(r);
+    if let Some(entry) = archive.entries()?.next() {
+        entry?;
+    }
+    Ok(())
+}
+
+fn probe_inner(path: &Path, compression: CompressionKind, passwords: &[String]) -> Result<Probe> {
+    let file = || std::fs::File::open(path);
+    match compression {
+        CompressionKind::None => {
+            file()?;
+        }
+        CompressionKind::Gzip => read_start(GzDecoder::new(file()?))?,
+        CompressionKind::Zstd => read_start(zstd::stream::read::Decoder::new(file()?)?)?,
+        CompressionKind::Bzip2 => read_start(bzip2::read::MultiBzDecoder::new(file()?))?,
+        CompressionKind::Xz => read_start(liblzma::read::XzDecoder::new_multi_decoder(file()?))?,
+        CompressionKind::Tar => first_tar_entry(file()?)?,
+        CompressionKind::TarGz => first_tar_entry(GzDecoder::new(file()?))?,
+        CompressionKind::TarBz2 => first_tar_entry(bzip2::read::MultiBzDecoder::new(file()?))?,
+        CompressionKind::TarXz => first_tar_entry(liblzma::read::XzDecoder::new_multi_decoder(file()?))?,
+        CompressionKind::TarZst => first_tar_entry(zstd::stream::read::Decoder::new(file()?)?)?,
+        CompressionKind::Zip => {
+            let mut archive = zip::ZipArchive::new(file()?)?;
+            for i in 0..archive.len() {
+                if !archive.by_index_raw(i)?.encrypted() {
+                    continue;
+                }
+                let opens = passwords.iter().any(|p| archive.by_index_decrypt(i, p.as_bytes()).is_ok());
+                return Ok(if opens { Probe::Readable } else { Probe::NeedsPassword });
+            }
+        }
+        CompressionKind::SevenZ => return Ok(probe_7z(path, passwords)),
+        CompressionKind::Rar => return Ok(rar::probe_rar(path, passwords)),
+    }
+    Ok(Probe::Readable)
+}
+
+fn probe_7z(path: &Path, passwords: &[String]) -> Probe {
+    use sevenz_rust2::{ArchiveReader, Error as SevenZError, Password};
+
+    let candidates = std::iter::once(Password::empty()).chain(passwords.iter().map(|p| Password::new(p)));
+    let mut needs_password = false;
+    let mut other = None;
+    for password in candidates {
+        let Ok(file) = std::fs::File::open(path) else { continue };
+        let outcome = ArchiveReader::new(file, password).and_then(|mut archive| {
+            // Decode the start of the first member that has data.
+            archive.for_each_entries(|entry, reader| {
+                if entry.is_directory() || entry.size() == 0 {
+                    return Ok(true);
+                }
+                let mut start = Vec::new();
+                reader.take(4096).read_to_end(&mut start).map_err(SevenZError::from)?;
+                Ok(false)
+            })
+        });
+        match outcome {
+            Ok(()) => return Probe::Readable,
+            Err(SevenZError::PasswordRequired | SevenZError::MaybeBadPassword(_)) => needs_password = true,
+            Err(e) => other = Some(e.to_string()),
+        }
+    }
+    match (needs_password, other) {
+        (true, _) => Probe::NeedsPassword,
+        (false, Some(e)) => Probe::Unreadable(e),
+        (false, None) => Probe::Unreadable("unreadable".into()),
+    }
 }
