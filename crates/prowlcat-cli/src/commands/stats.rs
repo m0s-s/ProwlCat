@@ -19,6 +19,9 @@ pub fn run(paths: Vec<PathBuf>, recursive: bool, check: bool, passwords: &[Strin
     let xz = count(|k| matches!(k, K::Xz | K::TarXz));
     let sevenz = count(|k| k == K::SevenZ);
     let rar = count(|k| k == K::Rar);
+    let sqlite = count(|k| k == K::Sqlite);
+    let bson = count(|k| k == K::Bson);
+    let json = count(|k| k == K::JsonArray);
 
     println!("ProwlCat stats");
     println!("  files:      {}", entries.len());
@@ -31,6 +34,9 @@ pub fn run(paths: Vec<PathBuf>, recursive: bool, check: bool, passwords: &[Strin
     println!("  xz:         {}", xz);
     println!("  7z:         {}", sevenz);
     println!("  rar:        {}", rar);
+    println!("  sqlite:     {}", sqlite);
+    println!("  bson:       {}", bson);
+    println!("  json array: {}", json);
     println!(
         "  total size: {:.2} GB",
         total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)

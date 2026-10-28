@@ -749,6 +749,125 @@ fn stats_check_says_when_there_is_no_program_for_rar() {
     }
 }
 
+// ---- SQLite, BSON and JSON arrays ----
+
+fn structured_corpus() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+
+    let db = rusqlite::Connection::open(p.join("leak.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE users (email TEXT, password TEXT, id INTEGER, token BLOB, note TEXT);
+         INSERT INTO users VALUES ('alice@example.com', 'Password1!', 1, x'5f4dcc3b', NULL);
+         INSERT INTO users VALUES ('bob@mail.example.com', '5f4dcc3b5aa765d61d8327deb882cf99', 2, NULL, 'two' || char(10) || 'lines');
+         CREATE TABLE logs (msg TEXT);
+         INSERT INTO logs VALUES ('login from carol@example.com');",
+    )
+    .unwrap();
+    drop(db);
+    fs::copy(p.join("leak.sqlite"), p.join("renamed.dat")).unwrap();
+
+    let mut bson = Vec::new();
+    for doc in [
+        bson::doc! { "email": "bson@example.com", "password": "p1", "n": 7_i32 },
+        bson::doc! { "profile": { "email": "deep@example.com" }, "tags": ["a", "b"] },
+    ] {
+        doc.to_writer(&mut bson).unwrap();
+    }
+    fs::write(p.join("dump.bson"), bson).unwrap();
+
+    fs::write(p.join("array.json"), r#"[{"email":"json@example.com","pw":"x"}, {"email":"second@example.com"}, "plain string"]"#).unwrap();
+    fs::write(p.join("object.json"), r#"{"email":"obj@example.com"}"#).unwrap();
+    dir
+}
+
+#[test]
+fn sqlite_rows_are_lines_and_tables_are_entries() {
+    let c = structured_corpus();
+    let d = c.path();
+    let (code, rows) = search(d, &["alice@example.com", "-p", "leak.sqlite"]);
+    assert_eq!((code, rows.len()), (0, 1));
+    assert_eq!(rows[0]["source"]["archive_entry"], "users");
+    assert_eq!(rows[0]["source"]["line_number"], 0);
+    assert_eq!(rows[0]["line_text"], "alice@example.com\tPassword1!\t1\t5f4dcc3b\t", "tab-separated values, a blob as hex, NULL as empty");
+
+    let (_, rows) = search(d, &["bob@mail.example.com", "-p", "leak.sqlite"]);
+    assert_eq!(rows[0]["source"]["line_number"], 1);
+    assert!(rows[0]["line_text"].as_str().unwrap().ends_with("\t\ttwo lines"), "a newline inside a value does not split the row: {:?}", rows[0]["line_text"]);
+
+    let (_, rows) = search(d, &["example.com", "-t", "domain", "-p", "leak.sqlite"]);
+    let tables: BTreeSet<String> = rows.iter().map(|r| r["source"]["archive_entry"].as_str().unwrap().to_string()).collect();
+    assert_eq!(tables, BTreeSet::from(["logs".to_string(), "users".to_string()]));
+
+    // Recognised from its first bytes, whatever the name.
+    let (code, rows) = search(d, &["alice@example.com", "-p", "renamed.dat"]);
+    assert_eq!((code, rows[0]["source"]["archive_entry"].as_str()), (0, Some("users")));
+}
+
+#[test]
+fn bson_documents_and_json_array_elements_are_lines_of_json() {
+    let c = structured_corpus();
+    let d = c.path();
+    let (code, rows) = search(d, &["bson@example.com", "-p", "dump.bson"]);
+    assert_eq!((code, rows.len()), (0, 1));
+    let doc: Value = serde_json::from_str(rows[0]["line_text"].as_str().unwrap()).unwrap();
+    assert_eq!(doc["email"], "bson@example.com");
+    assert_eq!(doc["n"], 7);
+    let (_, rows) = search(d, &["deep@example.com", "-p", "dump.bson"]);
+    assert_eq!(rows[0]["source"]["line_number"], 1, "each document is a line");
+
+    let (_, rows) = search(d, &["example.com", "-t", "domain", "-p", "array.json"]);
+    let lines: Vec<(u64, String)> = rows.iter().map(|r| (r["source"]["line_number"].as_u64().unwrap(), r["line_text"].as_str().unwrap().to_string())).collect();
+    assert_eq!(lines, [(0, r#"{"email":"json@example.com","pw":"x"}"#.to_string()), (1, r#"{"email":"second@example.com"}"#.to_string())]);
+
+    // A .json file that is not an array stays an ordinary text file.
+    let (code, rows) = search(d, &["obj@example.com", "-p", "object.json"]);
+    assert_eq!((code, rows[0]["source"]["line_number"].as_u64()), (0, Some(0)));
+    assert!(rows[0]["source"]["archive_entry"].is_null());
+}
+
+#[test]
+fn formats_text_reads_the_plain_bytes_instead() {
+    let c = structured_corpus();
+    let d = c.path();
+    let (_, rows) = search(d, &["example.com", "-t", "domain", "-p", "array.json", "--formats", "text"]);
+    assert!(!rows.is_empty() && rows.iter().all(|r| r["source"]["line_number"] == 0), "the whole array is one line");
+    assert!(rows.iter().all(|r| r["line_text"].as_str().unwrap().starts_with("[{")));
+    let (_, rows) = search_env(d, &["alice@example.com", "-p", "leak.sqlite"], &[("PROWLCAT_FORMATS", "text")]);
+    assert!(rows.iter().all(|r| r["source"]["archive_entry"].is_null()), "no tables: raw bytes");
+    assert_eq!(run(d, &["search", "x", "-p", ".", "--no-progress", "--formats", "bogus"]).code, 2);
+}
+
+#[test]
+fn stats_counts_and_checks_structured_files() {
+    let c = structured_corpus();
+    let d = c.path();
+    fs::write(d.join("broken.db"), [b"SQLite format 3\0".as_slice(), &[0xff; 200]].concat()).unwrap();
+    fs::write(d.join("broken.bson"), [0xff; 40]).unwrap();
+    fs::write(d.join("broken.json"), "[ not json at all").unwrap();
+    let o = run(d, &["stats", "-p", ".", "--check"]);
+    for want in ["sqlite:     3", "bson:       2", "json array: 2", "cannot be read:        3"] {
+        assert!(o.stdout.contains(want), "missing {want:?} in\n{}", o.stdout);
+    }
+    for name in ["broken.db", "broken.bson", "broken.json"] {
+        assert!(o.stdout.contains(name), "{name} in\n{}", o.stdout);
+    }
+    assert!(!o.stdout.contains("leak.sqlite"), "a readable database is not listed");
+}
+
+#[test]
+fn an_index_covers_a_sqlite_database() {
+    let c = structured_corpus();
+    let d = c.path();
+    let src = d.join("dbonly");
+    fs::create_dir(&src).unwrap();
+    fs::copy(d.join("leak.sqlite"), src.join("leak.sqlite")).unwrap();
+    assert_eq!(run(d, &["index", "-p", "dbonly", "-o", "idx"]).code, 0);
+    let (code, rows) = search(d, &["alice@example.com", "--index", "idx"]);
+    assert_eq!((code, rows.len()), (0, 1));
+    assert_eq!(rows[0]["source"]["archive_entry"], "users");
+}
+
 // ---- --extract, --unique, --mask ----
 
 fn combo_corpus() -> tempfile::TempDir {

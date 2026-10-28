@@ -2,6 +2,7 @@
 
 mod plain;
 mod rar;
+mod structured;
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,7 @@ pub struct LineReader {
     passwords: Vec<String>,
     progress: Option<Arc<AtomicU64>>,
     max_line: usize,
+    structured: bool,
 }
 
 impl LineReader {
@@ -43,6 +45,7 @@ impl LineReader {
             passwords: Vec::new(),
             progress: None,
             max_line: 0,
+            structured: true,
         })
     }
 
@@ -68,6 +71,13 @@ impl LineReader {
         self
     }
 
+    /// Read SQLite databases, BSON dumps and JSON arrays record by record (the default), or, with
+    /// `false`, as the plain bytes of the file.
+    pub fn with_structured(mut self, structured: bool) -> Self {
+        self.structured = structured;
+        self
+    }
+
     /// Every line whole, however long (the line cap does not apply).
     pub fn for_each_line(&mut self, mut f: impl FnMut(Option<&str>, u64, u64, &[u8])) -> Result<()> {
         self.run(0, &mut |m, n, o, _, l| f(m, n, o, l))
@@ -89,7 +99,11 @@ impl LineReader {
             let len = f.metadata()?.len();
             Ok(Counted::new(f, self.progress.clone(), local.clone(), len))
         };
-        let result = match self.compression {
+        let compression = match self.compression {
+            CompressionKind::Sqlite | CompressionKind::Bson | CompressionKind::JsonArray if !self.structured => CompressionKind::None,
+            other => other,
+        };
+        let result = match compression {
             CompressionKind::None => PlainReader::open_counting(
                 &self.path,
                 self.mmap_threshold,
@@ -115,6 +129,9 @@ impl LineReader {
             CompressionKind::TarZst => scan_tar(zstd::stream::read::Decoder::new(file()?)?, &self.path, cap, f),
             CompressionKind::SevenZ => scan_7z(&file, &self.path, &self.passwords, cap, f),
             CompressionKind::Rar => rar::scan_rar(&self.path, &self.passwords, cap, f),
+            CompressionKind::Sqlite => structured::scan_sqlite(&self.path, cap, f),
+            CompressionKind::Bson => structured::scan_bson(file()?, cap, &mut |m, n, o, k, l| f(m, n, o, k, l)),
+            CompressionKind::JsonArray => structured::scan_json_array(file()?, cap, &mut |m, n, o, k, l| f(m, n, o, k, l)),
             CompressionKind::Zip => scan_zip(file()?, &self.path, &self.passwords, cap, f),
         };
         if let Some(g) = &self.progress {
@@ -337,6 +354,9 @@ fn probe_inner(path: &Path, compression: CompressionKind, passwords: &[String]) 
         }
         CompressionKind::SevenZ => return Ok(probe_7z(path, passwords)),
         CompressionKind::Rar => return Ok(rar::probe_rar(path, passwords)),
+        CompressionKind::Sqlite => structured::probe_sqlite(path)?,
+        CompressionKind::Bson => structured::probe_bson(file()?)?,
+        CompressionKind::JsonArray => structured::probe_json_array(file()?)?,
     }
     Ok(Probe::Readable)
 }

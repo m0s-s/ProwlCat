@@ -64,7 +64,7 @@ fn next_start(window: &[u8], cut: usize) -> usize {
 /// `skip` is how many leading bytes of a piece were already part of the previous one.
 /// `line_start` is the offset of the line. Used by the memory-mapped path, where the line is
 /// already in memory; the streaming path cuts at exactly the same places.
-fn split_line(line: &[u8], line_start: u64, cap: usize, f: &mut impl FnMut(u64, usize, &[u8])) {
+pub(crate) fn split_line(line: &[u8], line_start: u64, cap: usize, f: &mut impl FnMut(u64, usize, &[u8])) {
     let (mut at, mut skip) = (0usize, 0usize);
     loop {
         let rest = &line[at..];

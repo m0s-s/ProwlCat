@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/m0s-s/ProwlCat)](https://github.com/m0s-s/ProwlCat/releases)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
-**A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.bz2`, `.xz`, `.zst`, `.zip`, `.7z`, `.rar`, `.tar` and its compressed forms) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
+**A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.bz2`, `.xz`, `.zst`, `.zip`, `.7z`, `.rar`, `.tar` and its compressed forms, and SQLite, BSON and JSON-array dumps) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
 
 <p align="center">
   <img src="assets/screenshots/tui-home.png" alt="ProwlCat interactive interface: the home screen with Fang, the mascot" width="860">
@@ -189,6 +189,7 @@ Search for one or more targets. Several targets can be given on the command line
 | `--loose` | plain-text, case-insensitive substring search, no type inference |
 | `-m, --max-matches <N>` | maximum matches per target (`0` = unlimited, the default) |
 | `-j, --threads <N>` | parallel worker threads (default: all cores) |
+| `--formats <MODE>` | `auto` (default) reads SQLite databases, BSON dumps and `.json` arrays record by record; `text` reads every file as the plain bytes it is. See [Databases and dumps](#databases-and-dumps) |
 | `--max-line-bytes <SIZE>` | search lines longer than `SIZE` in overlapping pieces, so memory stays bounded however long a line is (`64K`, `1M`; at least `4K`; `0` = whole lines, the default). See [Very long lines](#very-long-lines) |
 | `--snippet <SIZE>` | report only this many bytes of context on each side of a match in a long line, with `…` where it goes on (`0` = whole lines, the default) |
 | `-o, --output <FILE>` | write the results to a file; the extension picks the format (`.json`, `.ndjson`, `.csv`). `-o -` writes to standard output, as NDJSON unless `--format` says otherwise |
@@ -236,6 +237,10 @@ ProwlCat stats
   bzip2:      0
   xz:         0
   7z:         0
+  rar:        0
+  sqlite:     0
+  bson:       0
+  json array: 0
   total size: 0.00 GB
 ```
 
@@ -347,6 +352,23 @@ It does not match longer names such as `example.community` or `notexample.com`.
 | `.rar` | each member is scanned, through **7-Zip** run as a separate program (see below); needs `7zz` or `7z` installed |
 
 The format is recognised from the name and, for a file with another name (`dump.bin`), from its first bytes (gzip, bzip2, xz, zstd, zip, 7z). A `.7z`, `.zip` or `.rar` that cannot be opened (missing or wrong password, damage, no program for RAR) counts as a failed file: the table says `warnings: N files failed` and the log names it.
+
+### Databases and dumps
+
+Three kinds of file that are not text are read natively, record by record. Each record becomes one line, so matching, results, `--extract` and the output formats work as for any file:
+
+| Source | One line is | The result shows |
+|--------|-------------|------------------|
+| SQLite database (recognised by its first bytes, whatever the name) | a row: its values separated by tabs, a blob as hex, `NULL` as nothing, a newline inside a value as a blank | the table as the entry, the row number (from 0) as the line |
+| MongoDB dump (`.bson`) | a document, as relaxed extended JSON | the document number as the line |
+| `.json` file that is one array | an element, as compact JSON | the element number as the line |
+
+Rows, documents and elements are read one at a time, so memory does not depend on the size of the source. Notes:
+
+- The database is opened read-only. A SQLite database that is encrypted (SQLCipher) or damaged is a failed file, and `stats --check` names it. One inside an archive is not read as a database (it needs a file of its own); extract it first.
+- A `.json` file that is an object, or one line per record (`.ndjson`, `.jsonl`), is plain text and is searched as such.
+- `--extract` expects the account first. A SQLite row whose first column is the email gives `email:` followed by the other columns, tab-separated, as the secret.
+- `--formats text` (or `PROWLCAT_FORMATS=text`) turns all of this off and searches the plain bytes, which is what a damaged file may need.
 
 **RAR archives.** ProwlCat contains no RAR decoder, so it does not carry that code or its license terms. For `.rar` it runs 7-Zip, installed by you, as a separate program: it lists the archive, then reads every member in one pass and cuts the stream at the listed sizes, so members keep their names and nothing is written to disk. It looks for `7zz` and then `7z` in `PATH`; `PROWLCAT_RAR_TOOL=/path/to/7zz` picks one. Install it with your package manager (`pacman -S 7zip`, `apt install 7zip`, `brew install sevenzip`). Without it, a `.rar` is reported as a failed file and `stats --check` says so. A password goes to 7-Zip on its command line, where other users of the machine can see it for as long as it runs, as with `--password` itself.
 
@@ -518,6 +540,7 @@ The index covers emails, domains and IP addresses (including CIDR ranges). Plain
 | `PROWLCAT_TMP_DIR` | directory for those temporary files; by default the system temp directory, or `/var/tmp` / `~/.cache/prowlcat` when that is a RAM-backed `tmpfs` |
 | `PROWLCAT_MAX_LINE_BYTES` | default for `--max-line-bytes` (also used by the interactive interface) |
 | `PROWLCAT_SNIPPET` | default for `--snippet` (also used by the interactive interface) |
+| `PROWLCAT_FORMATS` | `text` reads databases and dumps as plain bytes (same as `--formats text`) |
 | `PROWLCAT_RAR_TOOL` | path of the program (`7zz`, `7z`) that reads `.rar` archives, instead of looking in `PATH` |
 | `PROWLCAT_LOG_FILE` | write log lines to this file while the interface is open (they would otherwise draw over it) |
 

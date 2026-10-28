@@ -96,6 +96,7 @@ fn composition(app: &App, s: &CorpusStats, width: usize) -> Vec<Line<'static>> {
         ("tar", s.tar, t.red),
         ("zip", s.zip, t.dim),
         ("bz2 xz 7z rar", s.bzip2 + s.xz + s.sevenz + s.rar, t.text),
+        ("db json", s.structured, t.line_strong),
     ];
     let total: usize = parts.iter().map(|p| p.1).sum();
     if total == 0 || width < 10 {

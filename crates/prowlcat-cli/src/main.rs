@@ -148,6 +148,33 @@ impl Archives {
     }
 }
 
+/// How databases and dumps are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FormatsMode {
+    /// SQLite databases, BSON dumps and JSON arrays are read record by record
+    Auto,
+    /// every file is read as the plain bytes it is
+    Text,
+}
+
+#[derive(Args)]
+#[command(next_help_heading = "Input")]
+struct Reading {
+    /// How to read SQLite databases, BSON dumps and `.json` files that are one array: `auto` reads
+    /// them record by record (a row, a document or an element is a line), `text` reads the plain
+    /// bytes of the file. Env: PROWLCAT_FORMATS
+    #[arg(long, value_enum, value_name = "MODE")]
+    formats: Option<FormatsMode>,
+}
+
+impl Reading {
+    fn export_to_env(&self) {
+        if let Some(mode) = self.formats {
+            std::env::set_var("PROWLCAT_FORMATS", if mode == FormatsMode::Text { "text" } else { "auto" });
+        }
+    }
+}
+
 /// Parallelism.
 #[derive(Args)]
 #[command(next_help_heading = "Limits and speed")]
@@ -227,6 +254,9 @@ struct TuiArgs {
     walk: Walk,
 
     #[command(flatten)]
+    reading: Reading,
+
+    #[command(flatten)]
     kind: Kind,
 
     /// Maximum matches per target (0 = unlimited)
@@ -275,6 +305,9 @@ struct SearchArgs {
 
     #[command(flatten)]
     walk: Walk,
+
+    #[command(flatten)]
+    reading: Reading,
 
     #[command(flatten)]
     kind: Kind,
@@ -479,6 +512,7 @@ fn run_tui(command: Option<Commands>) -> Result<ExitCode> {
 
 fn tui_from_args(args: TuiArgs) -> Result<TuiOptions> {
     args.lines.export_to_env();
+    args.reading.export_to_env();
     let start = if args.targets.is_empty() { Start::Home } else { Start::Search };
     let defaults = TuiOptions::default();
     Ok(TuiOptions {
@@ -503,6 +537,7 @@ fn tui_from_search(args: SearchArgs) -> Result<TuiOptions> {
         bail!("--output and --format write a file without opening the interface; use `--ui cli` for that, or press `e` on the results to export");
     }
     args.lines.export_to_env();
+    args.reading.export_to_env();
     let mut targets = args.targets;
     if let Some(file) = &args.targets_file {
         targets.extend(read_targets(file)?);
@@ -600,6 +635,9 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     }
     if let Some(n) = args.lines.snippet {
         config.snippet_bytes = n;
+    }
+    if let Some(mode) = args.reading.formats {
+        config.structured = mode == FormatsMode::Auto;
     }
 
     // Progress bar only on an interactive stderr, so piped/exported output stays clean.

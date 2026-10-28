@@ -46,6 +46,8 @@ pub struct CorpusStats {
     pub xz: usize,
     pub sevenz: usize,
     pub rar: usize,
+    /// SQLite databases, BSON dumps and `.json` files that are one array.
+    pub structured: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +133,7 @@ pub fn spawn_stats(job: u64, paths: Vec<PathBuf>, recursive: bool, tx: Sender<Ms
             xz: count(|k| matches!(k, CompressionKind::Xz | CompressionKind::TarXz)),
             sevenz: count(|k| k == CompressionKind::SevenZ),
             rar: count(|k| k == CompressionKind::Rar),
+            structured: count(|k| matches!(k, CompressionKind::Sqlite | CompressionKind::Bson | CompressionKind::JsonArray)),
         }))
     });
 }

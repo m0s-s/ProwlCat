@@ -56,6 +56,9 @@ pub struct ScanConfig {
     /// Lines that fit in the window are unchanged. `0` reports whole lines (the default).
     /// `PROWLCAT_SNIPPET` sets the default.
     pub snippet_bytes: usize,
+    /// Read SQLite databases, BSON dumps and JSON arrays record by record. `false` reads them as
+    /// the plain bytes of the file. `PROWLCAT_FORMATS=text` sets the default to `false`.
+    pub structured: bool,
 }
 
 /// Parse a size such as `4096`, `64K`, `8M` or `1G` (powers of 1024; the `B` and `iB` forms work too).
@@ -103,6 +106,7 @@ impl Default for ScanConfig {
             result_memory_mb: default_result_memory_mb(),
             max_line_bytes: env_size("PROWLCAT_MAX_LINE_BYTES"),
             snippet_bytes: env_size("PROWLCAT_SNIPPET"),
+            structured: !std::env::var("PROWLCAT_FORMATS").is_ok_and(|v| v.trim().eq_ignore_ascii_case("text")),
         }
     }
 }

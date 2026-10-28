@@ -41,7 +41,7 @@ impl ScanOrchestrator {
 
         let max_matches = self.config.max_matches_per_query;
         let mmap_threshold = self.config.mmap_threshold_mb * 1024 * 1024;
-        let shape = Shape { max_line: self.config.max_line_bytes, snippet: self.config.snippet_bytes };
+        let shape = Shape { max_line: self.config.max_line_bytes, snippet: self.config.snippet_bytes, structured: self.config.structured };
 
         let results: Vec<ScanResult> = pool.install(|| {
             entries
@@ -119,7 +119,7 @@ impl ScanOrchestrator {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(self.config.threads).build()?;
         let max_matches = self.config.max_matches_per_query;
         let mmap_threshold = self.config.mmap_threshold_mb * 1024 * 1024;
-        let shape = Shape { max_line: self.config.max_line_bytes, snippet: self.config.snippet_bytes };
+        let shape = Shape { max_line: self.config.max_line_bytes, snippet: self.config.snippet_bytes, structured: self.config.structured };
         let budget = usize::try_from(self.config.result_memory_mb.saturating_mul(1024 * 1024)).unwrap_or(usize::MAX);
         let collector = Collector::new(&entries, &queries, budget);
 
@@ -179,6 +179,7 @@ impl ScanOrchestrator {
 struct Shape {
     max_line: usize,
     snippet: usize,
+    structured: bool,
 }
 
 /// `ctx` bytes of context on each side of `span`, cut on character boundaries, with `…` marking
@@ -227,7 +228,8 @@ fn scan_entry(
 
     let mut reader = LineReader::open(&entry.path, entry.compression, mmap_threshold)?
         .with_passwords(passwords)
-        .with_max_line_bytes(shape.max_line);
+        .with_max_line_bytes(shape.max_line)
+        .with_structured(shape.structured);
     if let Some(p) = progress {
         reader = reader.with_progress(p.done.clone());
     }

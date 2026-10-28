@@ -19,6 +19,12 @@ pub enum CompressionKind {
     SevenZ,
     /// Read through an external program (see `prowlcat-decode`).
     Rar,
+    /// A SQLite database: every row of every table is a line.
+    Sqlite,
+    /// A MongoDB dump: every document is a line (as JSON).
+    Bson,
+    /// A `.json` file that is one array of values: every element is a line.
+    JsonArray,
 }
 
 impl CompressionKind {
@@ -26,7 +32,7 @@ impl CompressionKind {
     pub fn is_archive(self) -> bool {
         matches!(
             self,
-            Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::TarZst | Self::Zip | Self::SevenZ | Self::Rar
+            Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::TarZst | Self::Zip | Self::SevenZ | Self::Rar | Self::Sqlite
         )
     }
 }
@@ -97,13 +103,23 @@ pub fn detect_compression(path: &Path) -> CompressionKind {
     if ends(&[".xz"]) {
         return CompressionKind::Xz;
     }
+    if ends(&[".bson"]) {
+        return CompressionKind::Bson;
+    }
+    let json = ends(&[".json"]);
 
     // Magic bytes
     if let Ok(mut f) = std::fs::File::open(path) {
         use std::io::Read;
-        let mut buf = [0u8; 6];
+        let mut buf = [0u8; 64];
         let n = f.read(&mut buf).unwrap_or(0);
         let head = &buf[..n];
+        if head.starts_with(b"SQLite format 3\0") {
+            return CompressionKind::Sqlite;
+        }
+        if json && first_non_space(head) == Some(b'[') {
+            return CompressionKind::JsonArray;
+        }
         if head.starts_with(&[0x1f, 0x8b]) {
             return CompressionKind::Gzip;
         }
@@ -129,4 +145,10 @@ pub fn detect_compression(path: &Path) -> CompressionKind {
     }
 
     CompressionKind::None
+}
+
+/// The first byte that is not white space (after a UTF-8 byte order mark), if there is one.
+fn first_non_space(head: &[u8]) -> Option<u8> {
+    let head = head.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(head);
+    head.iter().copied().find(|b| !b.is_ascii_whitespace())
 }

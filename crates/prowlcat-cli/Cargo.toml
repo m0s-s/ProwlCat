@@ -32,3 +32,5 @@ bzip2.workspace = true
 liblzma.workspace = true
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 serde_json.workspace = true
+rusqlite.workspace = true
+bson.workspace = true
