@@ -160,6 +160,7 @@ prowlcat search [OPTIONS] [TARGET]...
 prowlcat index  [OPTIONS] --path <PATH> --output <DIR>
 prowlcat stats  [OPTIONS] --path <PATH>
 prowlcat tui    [OPTIONS] [TARGET]...
+prowlcat hashid [HASH]...
 ```
 
 The options are the same wherever they appear, and `--help` groups them the same way (Input, Matching, Limits and speed, Output, Encrypted archives):
@@ -195,6 +196,9 @@ Search for one or more targets. Several targets can be given on the command line
 | `--password <PASSWORD>` | password for encrypted zips (repeatable; visible in the process list, prefer the file) |
 | `--password-file <FILE>` | file with one candidate password per line |
 | `--no-progress` | no banner and no progress bar |
+| `--extract` | print `account:secret` for each matching line instead of the whole line. See [Extracting accounts](#extracting-accounts-and-hiding-secrets) |
+| `--unique` | with `--extract`: each account and secret once, sorted |
+| `--mask` | hide secrets: what follows each match, or the secret with `--extract`, is shown as `***` |
 | `-q, --quiet`, `-v, --verbose` | less or more logging |
 | `--ui <auto\|tui\|cli>` | choose the interface (see above) |
 
@@ -399,6 +403,44 @@ CSV:
 query,kind,match_kind,path,line,byte_offset,context
 ivan18@example.com,Email,Exact,demo/forum-dump.txt.gz,5,177,ivan18@example.com:Password1!
 ```
+
+## Extracting accounts and hiding secrets
+
+Search results are whole lines. For breach lists you often want only the pairs, once each, or want to share results without the passwords. Three options do it; none changes which lines match.
+
+**`--extract`** prints `account:secret` for each matching line:
+
+```console
+$ prowlcat search example.com -t domain -p ./breaches --extract
+alice@example.com:Password1!
+bob@mail.example.com:5f4dcc3b5aa765d61d8327deb882cf99
+```
+
+It expects the layout of combo lists, **the account first, then a separator (`:` `;` `,` `|` tab or blank), then the secret**; the secret may itself contain separators. A line laid out differently is not guessed at: it is skipped and counted (`… (2 skipped: not laid out as account then secret)`, on standard error). That covers URL records (`https://site/login:user:pass`), lines with the password first (`password:email`) and SQL rows. The account is the email address around the match, so a domain search gives full addresses.
+
+The output goes to standard output with no banner, or to `-o FILE`: `.json`, `.ndjson` and `.csv` give fields, any other extension gives the plain lines (and so does `--format table`). The fields are `account`, `secret`, `secret_looks_like`, `query`, `path`, `archive_entry` and `line`. `secret_looks_like` lists what the secret can be when it has the form of a password hash (see `hashid` below), and is empty for a plain password.
+
+**`--unique`** (with `--extract`) writes each account and secret once, sorted by account then secret. Accounts are compared ignoring case (`ALICE@x.io` and `alice@x.io` are one), secrets exactly; the first occurrence found is the one kept. It works for any number of records: they are sorted in temporary files, in the same place and the same way as the results of a large search (see [Large searches and memory](#large-searches-and-memory)).
+
+**`--mask`** hides secrets. With `--extract` the secret is written as `***` (and `secret_looks_like` still says what it was). Without it, every result keeps its line up to the match and the separator after it, then `***`: `alice@example.com:***`. This is made for `account:secret` lines; **a line that keeps the password before the account is not protected**, and a match is not a guarantee that nothing sensitive is left elsewhere on the line. Check what you share.
+
+```bash
+# Every pair once, passwords hidden, as CSV, ready to hand over
+prowlcat search example.com -t domain -p ./breaches --extract --unique --mask -o exposed.csv
+```
+
+## Identifying hashes
+
+`prowlcat hashid` says what kind of password hash a string looks like. It identifies; it does not decrypt or crack anything.
+
+```console
+$ prowlcat hashid 5f4dcc3b5aa765d61d8327deb882cf99 '$2y$10$…' hunter2
+5f4dcc3b5aa765d61d8327deb882cf99	MD5, NTLM, MD4, LM, md5(md5(password))
+$2y$10$…	bcrypt
+hunter2	unknown
+```
+
+Formats with a prefix (`$2y$`, `$6$`, `$P$`, `{SSHA}`, `pbkdf2_sha256$`, a MySQL `*`…) give one answer. A bare hex digest says only its length, so the answer is a list, likeliest first: nothing in 32 hex digits tells an MD5 from an NTLM hash. With no arguments it reads one hash per line from standard input; the exit code is 1 if any could not be identified.
 
 ## Large searches and memory
 

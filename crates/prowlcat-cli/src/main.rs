@@ -59,6 +59,8 @@ enum Commands {
     Stats(StatsArgs),
     /// Open the interactive interface (the default when run with no subcommand in a terminal)
     Tui(TuiArgs),
+    /// Tell what kind of password hash a string looks like (it identifies, it does not crack)
+    Hashid(HashidArgs),
 }
 
 /// What `-t/--type` can force.
@@ -301,6 +303,24 @@ struct SearchArgs {
     #[arg(long, help_heading = "Output")]
     no_progress: bool,
 
+    /// Print `account:secret` for each matching line instead of the whole line. It expects the
+    /// layout of combo lists, the account first and then the secret (`alice@example.com:hunter2`);
+    /// lines laid out differently are counted and skipped, never guessed at. Goes to standard output
+    /// unless -o names a file; --format json|ndjson|csv gives fields (and what a hash-looking
+    /// secret can be)
+    #[arg(long, help_heading = "Extraction")]
+    extract: bool,
+
+    /// With --extract: each account and secret once (accounts compared ignoring case), sorted
+    #[arg(long, requires = "extract", help_heading = "Extraction")]
+    unique: bool,
+
+    /// Hide secrets: what follows a match is shown as `***` (with --extract, the secret is).
+    /// Made for `account:secret` lines; a line that keeps the password before the account is not
+    /// protected
+    #[arg(long, help_heading = "Extraction")]
+    mask: bool,
+
     #[command(flatten)]
     archives: Archives,
 }
@@ -323,6 +343,13 @@ struct IndexArgs {
 
     #[command(flatten)]
     archives: Archives,
+}
+
+#[derive(Parser)]
+struct HashidArgs {
+    /// Hashes to identify; with none, they are read from standard input, one per line
+    #[arg(value_name = "HASH")]
+    hashes: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -380,6 +407,7 @@ fn run() -> Result<ExitCode> {
                     let passwords = args.archives.load()?;
                     commands::stats::run(args.paths, args.walk.on(), args.check, &passwords)
                 }
+                Some(Commands::Hashid(args)) => commands::hashid::run(args.hashes),
                 Some(Commands::Tui(_)) | None => bail!("internal error: no classic command to run"),
             }
         }
@@ -443,6 +471,7 @@ fn run_tui(command: Option<Commands>) -> Result<ExitCode> {
         Some(Commands::Stats(args)) => {
             TuiOptions { paths: args.paths, recursive: args.walk.on(), start: Start::Stats, ..TuiOptions::default() }
         }
+        Some(Commands::Hashid(_)) => TuiOptions::default(),
     };
     prowlcat_tui::run(options)?;
     Ok(ExitCode::SUCCESS)
@@ -532,6 +561,7 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     // preceded by the banner.
     let data_on_stdout = match (&args.output, args.format) {
         (Some(path), _) => path.as_os_str() == "-",
+        (None, _) if args.extract => true,
         (None, format) => format.is_some_and(|f| f != Format::Table),
     };
     if !args.no_progress && !data_on_stdout {
@@ -593,18 +623,33 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     };
     found.summary_mut().elapsed_ms = start.elapsed().as_millis() as u64;
 
+    if args.extract {
+        let budget = usize::try_from(ScanConfig::default().result_memory_mb.saturating_mul(1 << 20)).unwrap_or(usize::MAX);
+        return write_extract(&found, args.output.as_deref(), args.format, args.unique, args.mask, budget);
+    }
+
+    // With --mask every result is handed on with what follows its match hidden.
+    let mask = args.mask;
+    let results = found.iter().map(move |r| {
+        r.map(|mut r| {
+            if mask {
+                r.line_text = prowlcat_core::mask::mask_after_match(&r.line_text, r.matched_span);
+            }
+            r
+        })
+    });
     let format: Option<OutputFormat> = args.format.map(Into::into);
     match args.output {
         Some(path) if path.as_os_str() == "-" => {
-            write_stdout_iter(format.unwrap_or(OutputFormat::Ndjson), found.iter(), found.summary())?
+            write_stdout_iter(format.unwrap_or(OutputFormat::Ndjson), results, found.summary())?
         }
         Some(path) => {
             let format = format.unwrap_or_else(|| infer_format(&path));
-            write_output_iter(&path, format, found.iter(), found.summary())?
+            write_output_iter(&path, format, results, found.summary())?
         }
         None => match format {
-            Some(format) => write_stdout_iter(format, found.iter(), found.summary())?,
-            None => print_results_iter(found.iter(), found.summary())?,
+            Some(format) => write_stdout_iter(format, results, found.summary())?,
+            None => print_results_iter(results, found.summary())?,
         },
     }
 
@@ -613,6 +658,72 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+/// `--extract`: write `account:secret` for the matching lines whose layout allows it.
+fn write_extract(
+    found: &SortedResults,
+    output: Option<&std::path::Path>,
+    format: Option<Format>,
+    unique: bool,
+    mask: bool,
+    budget: usize,
+) -> Result<ExitCode> {
+    use std::cell::Cell;
+
+    let (matches, skipped) = (Cell::new(0u64), Cell::new(0u64));
+    let records = found.iter().filter_map(|r| match r {
+        Ok(r) => {
+            matches.set(matches.get() + 1);
+            let record = prowlcat_core::extract::record_from(&r);
+            if record.is_none() {
+                skipped.set(skipped.get() + 1);
+            }
+            record.map(Ok)
+        }
+        Err(e) => Some(Err(e)),
+    });
+
+    let to_stdout = output.is_none_or(|p| p.as_os_str() == "-");
+    let format: OutputFormat = match (format, output) {
+        (Some(f), _) => f.into(),
+        (None, Some(p)) if !to_stdout => match p.extension().and_then(|e| e.to_str()) {
+            Some("json") => OutputFormat::Json,
+            Some("ndjson") | Some("jsonl") => OutputFormat::Ndjson,
+            Some("csv") => OutputFormat::Csv,
+            _ => OutputFormat::Table,
+        },
+        _ => OutputFormat::Table,
+    };
+
+    let records: Box<dyn Iterator<Item = Result<prowlcat_core::Record>> + '_> = if unique {
+        let mut u = prowlcat_core::unique::Unique::new(budget);
+        for r in records {
+            u.push(r?)?;
+        }
+        Box::new(u.finish()?)
+    } else {
+        Box::new(records)
+    };
+
+    let written = if to_stdout {
+        let result = prowlcat_output::write_records_to(std::io::stdout().lock(), format, mask, records);
+        match result {
+            Err(e) if e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)) => 0,
+            other => other?,
+        }
+    } else {
+        let path = output.expect("a file when not standard output");
+        prowlcat_output::write_records_to(std::fs::File::create(path)?, format, mask, records)?
+    };
+
+    eprintln!(
+        "{written} {} from {} matching lines ({} skipped: not laid out as account then secret)",
+        if unique { "unique records" } else { "records" },
+        matches.get(),
+        skipped.get(),
+    );
+    Ok(if written > 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
 
 fn load_passwords(mut passwords: Vec<String>, file: Option<&std::path::Path>) -> Result<Vec<String>> {

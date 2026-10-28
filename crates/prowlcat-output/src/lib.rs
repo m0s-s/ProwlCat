@@ -6,6 +6,7 @@
 
 mod csv;
 mod json;
+mod records;
 mod terminal;
 
 use std::borrow::Borrow;
@@ -14,6 +15,7 @@ use std::path::Path;
 use anyhow::Result;
 use prowlcat_types::{ScanResult, ScanSummary};
 
+pub use records::write_records_to;
 pub use terminal::{print_results, print_results_iter};
 
 pub enum OutputFormat {

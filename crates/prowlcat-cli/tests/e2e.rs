@@ -749,6 +749,166 @@ fn stats_check_says_when_there_is_no_program_for_rar() {
     }
 }
 
+// ---- --extract, --unique, --mask ----
+
+fn combo_corpus() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.txt"),
+        "alice@example.com:Password1!\n\
+         bob@mail.example.com:5f4dcc3b5aa765d61d8327deb882cf99\n\
+         ALICE@EXAMPLE.COM:Password1!\n\
+         carol@example.com;semi:colon\n\
+         https://example.com/login:dave:pw\n\
+         hunter2:erin@example.com\n\
+         frank@example.com\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("b.txt"), "alice@example.com:Password1!\nzed@example.com:last\n").unwrap();
+    dir
+}
+
+fn extract(d: &Path, extra: &[&str]) -> Out {
+    run(d, &[&["search", "example.com", "-t", "domain", "-p", ".", "--extract"][..], extra].concat())
+}
+
+#[test]
+fn extract_prints_account_and_secret_and_counts_what_it_skips() {
+    let c = combo_corpus();
+    let o = extract(c.path(), &["--no-recursive"]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    // No banner, only records, in the order of the results (file, then line).
+    let lines: Vec<&str> = o.stdout.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "alice@example.com:Password1!",
+            "bob@mail.example.com:5f4dcc3b5aa765d61d8327deb882cf99",
+            "ALICE@EXAMPLE.COM:Password1!",
+            "carol@example.com:semi:colon",
+            "frank@example.com:",
+            "alice@example.com:Password1!",
+            "zed@example.com:last",
+        ]
+    );
+    assert!(o.stderr.contains("2 skipped"), "the URL line and the password-first line: {}", o.stderr);
+}
+
+#[test]
+fn unique_keeps_the_first_of_each_and_sorts() {
+    let c = combo_corpus();
+    let o = extract(c.path(), &["--unique"]);
+    assert_eq!(o.code, 0);
+    assert_eq!(
+        o.stdout.lines().collect::<Vec<_>>(),
+        [
+            "alice@example.com:Password1!", // the case variant and the copy in b.txt are gone
+            "bob@mail.example.com:5f4dcc3b5aa765d61d8327deb882cf99",
+            "carol@example.com:semi:colon",
+            "frank@example.com:",
+            "zed@example.com:last",
+        ]
+    );
+    assert!(o.stderr.contains("5 unique records"), "{}", o.stderr);
+    assert_eq!(run(c.path(), &["search", "x", "-p", ".", "--unique", "--no-progress"]).code, 2, "--unique needs --extract");
+}
+
+#[test]
+fn extract_fields_name_what_a_hash_can_be_and_mask_hides_only_the_secret() {
+    let c = combo_corpus();
+    let d = c.path();
+    let o = extract(d, &["--format", "ndjson", "--unique"]);
+    let rows = json_lines(&o.stdout);
+    let bob = rows.iter().find(|r| r["account"] == "bob@mail.example.com").unwrap();
+    assert_eq!(bob["secret_looks_like"][0], "MD5");
+    assert_eq!(bob["query"], "example.com");
+    assert!(rows.iter().find(|r| r["account"] == "alice@example.com").unwrap()["secret_looks_like"].as_array().unwrap().is_empty());
+
+    let o = extract(d, &["--format", "ndjson", "--unique", "--mask"]);
+    let rows = json_lines(&o.stdout);
+    assert!(rows.iter().all(|r| r["secret"] == "***"));
+    let bob = rows.iter().find(|r| r["account"] == "bob@mail.example.com").unwrap();
+    assert_eq!(bob["secret_looks_like"][0], "MD5", "what it looks like is kept, the secret is not");
+    assert!(!o.stdout.contains("Password1!") && !o.stdout.contains("5f4dcc3b"), "{}", o.stdout);
+}
+
+#[test]
+fn extract_to_a_file_picks_the_format_from_the_extension() {
+    let c = combo_corpus();
+    let d = c.path();
+    let out = tempfile::tempdir().unwrap(); // outside the corpus, so it is not searched next time
+    let at = |name: &str| out.path().join(name).to_str().unwrap().to_string();
+    extract(d, &["--no-recursive", "-o", &at("out.txt")]);
+    assert!(fs::read_to_string(at("out.txt")).unwrap().starts_with("alice@example.com:Password1!\n"));
+    extract(d, &["--no-recursive", "-o", &at("out.csv")]);
+    assert!(fs::read_to_string(at("out.csv")).unwrap().starts_with("account,secret,secret_looks_like,"));
+    extract(d, &["--no-recursive", "-o", &at("out.json")]);
+    let v: Value = serde_json::from_str(&fs::read_to_string(at("out.json")).unwrap()).unwrap();
+    assert_eq!(v["records"].as_array().unwrap().len(), 7);
+    // Nothing to extract: exit 1.
+    let o = run(d, &["search", "nobody.test", "-t", "domain", "-p", ".", "--extract"]);
+    assert_eq!(o.code, 1);
+}
+
+#[test]
+fn mask_hides_what_follows_each_match_in_any_output() {
+    let c = combo_corpus();
+    let d = c.path();
+    let (code, rows) = search(d, &["alice@example.com", "-p", "a.txt", "--mask"]);
+    assert_eq!(code, 0);
+    for r in &rows {
+        let text = r["line_text"].as_str().unwrap();
+        assert!(text.ends_with(":***"), "{text}");
+        let span = r["matched_span"].as_array().unwrap();
+        assert_eq!(&text[span[0].as_u64().unwrap() as usize..span[1].as_u64().unwrap() as usize].to_lowercase(), "alice@example.com");
+    }
+    for format in ["table", "csv", "json"] {
+        let o = run(d, &["search", "alice@example.com", "-p", "a.txt", "--mask", "--format", format]);
+        assert!(!o.stdout.contains("Password1!"), "{format}: {}", o.stdout);
+        assert!(o.stdout.contains("***"), "{format}");
+    }
+    // Not asked for: untouched.
+    let o = run(d, &["search", "alice@example.com", "-p", "a.txt", "--no-progress"]);
+    assert!(o.stdout.contains("Password1!"));
+}
+
+// ---- hash identification ----
+
+#[test]
+fn hashid_names_the_candidates_and_says_unknown() {
+    let d = tempfile::tempdir().unwrap();
+    let o = run(d.path(), &["hashid", "5f4dcc3b5aa765d61d8327deb882cf99", "$2y$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let lines: Vec<&str> = o.stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("5f4dcc3b5aa765d61d8327deb882cf99\tMD5, NTLM"), "{}", lines[0]);
+    assert!(lines[1].ends_with("\tbcrypt"), "{}", lines[1]);
+
+    let o = run(d.path(), &["hashid", "hunter2", "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8"]);
+    assert_eq!(o.code, 1, "one of them is not a hash");
+    assert!(o.stdout.contains("hunter2\tunknown") && o.stdout.contains("\tSHA-1"), "{}", o.stdout);
+}
+
+#[test]
+fn hashid_reads_standard_input() {
+    let d = tempfile::tempdir().unwrap();
+    let mut child = Command::new(bin())
+        .args(["hashid"])
+        .current_dir(d.path())
+        .env("PROWLCAT_UI", "cli")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"5f4dcc3b5aa765d61d8327deb882cf99\n\n*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19\n").unwrap();
+    let o = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(out.contains("MySQL 4.1+"), "{out}");
+}
+
 #[test]
 fn stats_counts_rar() {
     let c = rar_corpus();

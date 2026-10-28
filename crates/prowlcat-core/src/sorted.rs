@@ -250,7 +250,7 @@ impl Collector {
 /// tmpfs, and a large search would fill it and exhaust memory, which is what the runs exist to
 /// avoid. `PROWLCAT_TMP_DIR` wins; otherwise the system temporary directory is used unless it is
 /// RAM-backed, in which case `/var/tmp` and then `~/.cache/prowlcat` are tried.
-fn spill_dir() -> Option<&'static Path> {
+pub(crate) fn spill_dir() -> Option<&'static Path> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
         if let Some(dir) = std::env::var_os("PROWLCAT_TMP_DIR").filter(|d| !d.is_empty()) {

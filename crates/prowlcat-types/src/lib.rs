@@ -69,3 +69,17 @@ pub struct ScanSummary {
     pub elapsed_ms: u64,
     pub errors: usize,
 }
+
+/// An account and the secret that follows it on its line, taken from a match (`--extract`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Record {
+    pub account: String,
+    pub secret: String,
+    /// What the secret can be if it looks like a password hash (empty when it looks like a plain password).
+    pub secret_looks_like: Vec<String>,
+    /// The target the line matched.
+    pub query: String,
+    pub path: String,
+    pub archive_entry: Option<String>,
+    pub line_number: Option<u64>,
+}
