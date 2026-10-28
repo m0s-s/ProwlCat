@@ -1,21 +1,32 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+### Added
 
 - New formats: `.bz2`, `.xz` and `.7z` (including password-protected 7z, with `--password` / `--password-file`), and the tarballs `.tar.bz2` (`.tbz2`), `.tar.xz` (`.txz`) and `.tar.zst`, which are now read member by member (a `.tar.zst` used to be read as one stream of tar bytes). Multi-stream bzip2 and xz files are read to the end, and a file whose name does not say what it is is recognised from its first bytes. `stats` counts the new kinds. New dependencies: `bzip2`, `liblzma`, `sevenz-rust2` (licenses checked; `deny.toml` now also allows `bzip2-1.0.6`, the libbzip2 license).
-- Fix: the table cut a long line at 200 bytes even in the middle of a character, which stopped the program with a panic on lines holding Cyrillic, Chinese or accented text. It now cuts on a character boundary.
-- `--format table -o FILE` writes the table to the file (it used to print it on screen and write nothing). `--formats` also exists on `index` and `stats`, so the options that decide how files are read mean the same everywhere. The help of every option shared by several commands is the same text, and a test keeps it so.
-- Housekeeping: removed an unused ASCII-art asset and test fixture, the dependencies nothing used (`tracing` in the CLI, `thiserror`, `bstr` and `serde` in the lower crates, `crossbeam-channel`), two unused scan settings and an always-empty field of `SourceEntry`. `ARCHITECTURE.md` describes the formats, the extraction tools and the release gate.
 - Databases and dumps are read natively, record by record, each record being a line: SQLite databases (recognised from their first bytes; a row is its tab-separated values, the table is the archive entry), MongoDB `.bson` dumps (a document is a line of relaxed extended JSON) and `.json` files that are one array (an element is a line, read one at a time). `--formats text` (or `PROWLCAT_FORMATS=text`) reads every file as plain bytes instead. `stats` counts them and `stats --check` finds the ones that cannot be opened. New dependencies: `rusqlite` (with SQLite bundled) and `bson`, both MIT. The binary grows by about 3 MB, mostly SQLite.
-- `--extract` prints `account:secret` for the matching lines laid out as account then secret (lines laid out otherwise are counted and skipped, not guessed at), as plain lines or as JSON, NDJSON or CSV with a `secret_looks_like` field. `--unique` writes each account and secret once, sorted, in bounded memory (sorted in temporary files like the search results). `--mask` hides secrets: what follows each match, or the secret with `--extract`. `prowlcat hashid` says what kind of password hash a string looks like (identification only). None of them changes which lines match.
 - `.rar` archives are read through 7-Zip (`7zz` or `7z`), run as a separate program that you install: ProwlCat contains no RAR decoder. The archive is listed and then streamed once, cut at the listed sizes, so members keep their names and nothing is written to disk. `unrar` is never used unless `PROWLCAT_RAR_TOOL` names it. Password-protected RAR uses `--password` / `--password-file`. Tested here with `unrar` standing in for 7-Zip and with the output parsers; run the end-to-end suite on a machine with 7-Zip to cover the real thing.
+- `--extract` prints `account:secret` for the matching lines laid out as account then secret (lines laid out otherwise are counted and skipped, not guessed at), as plain lines or as JSON, NDJSON or CSV with a `secret_looks_like` field. `--unique` writes each account and secret once, sorted, in bounded memory (sorted in temporary files like the search results). `--mask` hides secrets: what follows each match, or the secret with `--extract`. `prowlcat hashid` says what kind of password hash a string looks like (identification only). None of them changes which lines match.
 - `prowlcat stats --check` opens every file, without searching it, and reports which ones a search could not read: encrypted without a password that fits, a RAR with no program to read it, damaged, or not the format their name says. It takes `--password` and `--password-file`.
 - Very long lines: `--max-line-bytes SIZE` searches a line longer than `SIZE` in overlapping pieces, cut at separators, so memory stays bounded however long a line is (a one-line SQL `INSERT` of hundreds of MB no longer needs several times its size in RAM); `--snippet BYTES` reports only the context around a match instead of the whole line. Both are off by default and then nothing changes. `PROWLCAT_MAX_LINE_BYTES` and `PROWLCAT_SNIPPET` set the defaults, and the interactive interface honours them.
+
+### Changed (command line)
+
 - Command line: the options that several subcommands share (`-p`, `-r`, `-j`, the passwords, the line options, `-t`) are now defined once, so they read the same everywhere, and `--help` groups them (Input, Matching, Limits and speed, Output, Encrypted archives). `-t` and `--format` list their values and are checked up front (any case). `-q` and `-v` have descriptions. The `tui` subcommand takes `--max-line-bytes` and `--snippet` too. Nothing that worked before stops working.
 - Command line: `--no-recursive` stays in the top level (`-r` was always on and could not be turned off; it is still accepted). `--format json|ndjson|csv` without `-o`, and `-o -`, write the results to standard output with no banner before them; before, `--format` without `-o` was ignored and a table was printed. A script that passed `--format` without `-o` and relied on the table now gets that format.
+- `--format table -o FILE` writes the table to the file (it used to print it on screen and write nothing). `--formats` also exists on `index` and `stats`, so the options that decide how files are read mean the same everywhere. The help of every option shared by several commands is the same text, and a test keeps it so.
+
+### Fixed
+
+- Fix: the table cut a long line at 200 bytes even in the middle of a character, which stopped the program with a panic on lines holding Cyrillic, Chinese or accented text. It now cuts on a character boundary.
 - Reliability: if the results of a search cannot be parked on disk (disk full, bad `PROWLCAT_TMP_DIR`) the search now stops with a clear error instead of filling the memory until the system kills it.
+
+### Project
+
 - Testing: an end-to-end suite runs the real binary on a generated corpus, and the release workflow runs it on every packaged binary; the release is created only when all platforms pass. `scripts/release-check.sh` is the gate to run before tagging.
 - Licenses: `deny.toml` (checked in CI and on release) and `THIRD-PARTY-NOTICES.md`, which now ships in every package.
+- Housekeeping: removed an unused ASCII-art asset and test fixture, the dependencies nothing used (`tracing` in the CLI, `thiserror`, `bstr` and `serde` in the lower crates, `crossbeam-channel`), two unused scan settings and an always-empty field of `SourceEntry`. `ARCHITECTURE.md` describes the formats, the extraction tools and the release gate.
 
 ## 0.2.2
 
