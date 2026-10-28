@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Very long lines: `--max-line-bytes SIZE` searches a line longer than `SIZE` in overlapping pieces, cut at separators, so memory stays bounded however long a line is (a one-line SQL `INSERT` of hundreds of MB no longer needs several times its size in RAM); `--snippet BYTES` reports only the context around a match instead of the whole line. Both are off by default and then nothing changes. `PROWLCAT_MAX_LINE_BYTES` and `PROWLCAT_SNIPPET` set the defaults, and the interactive interface honours them.
+- Command line: the options that several subcommands share (`-p`, `-r`, `-j`, the passwords, the line options, `-t`) are now defined once, so they read the same everywhere, and `--help` groups them (Input, Matching, Limits and speed, Output, Encrypted archives). `-t` and `--format` list their values and are checked up front (any case). `-q` and `-v` have descriptions. The `tui` subcommand takes `--max-line-bytes` and `--snippet` too. Nothing that worked before stops working.
+- Command line: `--no-recursive` stays in the top level (`-r` was always on and could not be turned off; it is still accepted). `--format json|ndjson|csv` without `-o`, and `-o -`, write the results to standard output with no banner before them; before, `--format` without `-o` was ignored and a table was printed. A script that passed `--format` without `-o` and relied on the table now gets that format.
+- Reliability: if the results of a search cannot be parked on disk (disk full, bad `PROWLCAT_TMP_DIR`) the search now stops with a clear error instead of filling the memory until the system kills it.
+- Testing: an end-to-end suite runs the real binary on a generated corpus, and the release workflow runs it on every packaged binary; the release is created only when all platforms pass. `scripts/release-check.sh` is the gate to run before tagging.
+- Licenses: `deny.toml` (checked in CI and on release) and `THIRD-PARTY-NOTICES.md`, which now ships in every package.
+
 ## 0.2.2
 
 - Docs: the README is rewritten with screenshots of the interface, the full command-line reference, output samples and a section on large searches.

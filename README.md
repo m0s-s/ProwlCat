@@ -157,10 +157,21 @@ The command line is the scripting interface and is untouched. The interactive UI
 
 ```
 prowlcat search [OPTIONS] [TARGET]...
-prowlcat index  [OPTIONS] --path <PATHS> --output <DIR>
-prowlcat stats  [OPTIONS] --path <PATHS>
+prowlcat index  [OPTIONS] --path <PATH> --output <DIR>
+prowlcat stats  [OPTIONS] --path <PATH>
 prowlcat tui    [OPTIONS] [TARGET]...
 ```
+
+The options are the same wherever they appear, and `--help` groups them the same way (Input, Matching, Limits and speed, Output, Encrypted archives):
+
+| Option | Meaning wherever it appears (`stats` takes only the first two) |
+|--------|---------------------------------------------------------------|
+| `-p, --path <PATH>` | what to read: files, directories or globs, repeatable |
+| `-r, --recursive` / `--no-recursive` | descend into subdirectories (the default) or stay in the top level |
+| `-j, --threads <N>` | parallel worker threads |
+| `--password <PASSWORD>`, `--password-file <FILE>` | candidate passwords for encrypted zips |
+
+Sizes (`--max-line-bytes`, `--snippet`) accept `K`, `M` and `G`. `-t/--type` and `--format` take a fixed set of values, shown by `--help` and checked before anything runs, in any case (`-t EMAIL` works).
 
 ### `prowlcat search`
 
@@ -171,21 +182,27 @@ Search for one or more targets. Several targets can be given on the command line
 | `[TARGET]...` | targets: email, domain, IP, CIDR or plain text |
 | `-f, --targets-file <FILE>` | file with one target per line |
 | `-p, --path <PATH>` | files, directories or globs to scan (repeatable) |
-| `-r, --recursive` | descend into subdirectories |
+| `-r, --recursive`, `--no-recursive` | descend into subdirectories (the default; `-r` is accepted for old scripts) or do not |
 | `--index <DIR>` | search a prebuilt index instead of scanning (see [Indexing](#indexing)) |
 | `-t, --type <TYPE>` | force the target type: `auto` (default), `email`, `domain`, `ip`, `cidr`, `text` |
 | `--loose` | plain-text, case-insensitive substring search, no type inference |
 | `-m, --max-matches <N>` | maximum matches per target (`0` = unlimited, the default) |
 | `-j, --threads <N>` | parallel worker threads (default: all cores) |
-| `-o, --output <FILE>` | write the results to a file; the extension picks the format (`.json`, `.ndjson`, `.csv`) |
-| `--format <FORMAT>` | override the format of `-o`: `table`, `json`, `ndjson`, `csv` |
-| `--password <PW>` | password for encrypted zips (repeatable; visible in the process list, prefer the file) |
+| `--max-line-bytes <SIZE>` | search lines longer than `SIZE` in overlapping pieces, so memory stays bounded however long a line is (`64K`, `1M`; at least `4K`; `0` = whole lines, the default). See [Very long lines](#very-long-lines) |
+| `--snippet <SIZE>` | report only this many bytes of context on each side of a match in a long line, with `…` where it goes on (`0` = whole lines, the default) |
+| `-o, --output <FILE>` | write the results to a file; the extension picks the format (`.json`, `.ndjson`, `.csv`). `-o -` writes to standard output, as NDJSON unless `--format` says otherwise |
+| `--format <FORMAT>` | `table`, `json`, `ndjson` (or `jsonl`), `csv`. With `-o` it overrides the extension; **without `-o` the results go to standard output in that format**, which is what you want in a pipe |
+| `--password <PASSWORD>` | password for encrypted zips (repeatable; visible in the process list, prefer the file) |
 | `--password-file <FILE>` | file with one candidate password per line |
-| `--no-progress` | no progress bar |
+| `--no-progress` | no banner and no progress bar |
 | `-q, --quiet`, `-v, --verbose` | less or more logging |
 | `--ui <auto\|tui\|cli>` | choose the interface (see above) |
 
-Without `-o` the results are printed as a readable table on standard output.
+Without `-o` or `--format` the results are printed as a readable table on standard output. With `--format json|ndjson|csv` (or `-o -`) the output is only the data, with no banner in front, so it can be piped:
+
+```bash
+prowlcat search example.com -t domain -p ./data --format ndjson | jq -r .source.path | sort | uniq -c
+```
 
 ### `prowlcat index`
 
@@ -195,7 +212,7 @@ Build a Tantivy index of a corpus. See [Indexing](#indexing).
 |--------|-------------|
 | `-p, --path <PATH>` | files, directories or globs to index |
 | `-o, --output <DIR>` | directory to create the index in (must not exist or be empty) |
-| `-r, --recursive` | descend into subdirectories |
+| `-r, --recursive`, `--no-recursive` | as for `search` |
 | `-j, --threads <N>` | parallel worker threads |
 | `--password`, `--password-file` | as for `search` |
 
@@ -278,6 +295,8 @@ jq -r '.source.path' hits.ndjson | sort | uniq -c | sort -rn
 | ip | `-t ip` | a single IPv4 or IPv6 address, as a whole token |
 | cidr | `-t cidr` | the literal CIDR string, and every IP address inside the network |
 | text | `-t text` or `--loose` | case-insensitive substring, no type rules |
+
+**SQL dumps** are plain text, so they are searched like any other file (`INSERT … VALUES (…),(…)`, `COPY` blocks, `.sql.gz`). ProwlCat does not parse SQL: a match is a match in the text, and it does not know which column it is in. Dumps often put thousands of rows on one line; see [Very long lines](#very-long-lines).
 
 **Domain search** finds `example.com` in:
 
@@ -368,6 +387,35 @@ A very large search can write many gigabytes there while it runs; the files are 
 
 **In the interactive interface** the results screen shows the first 250,000 matches. A search that finds more still counts all of them, and `/export` writes the complete set.
 
+### Very long lines
+
+Some dumps are one gigantic line: a `mysqldump` `INSERT` with every row of a table, a minified export. By default a line is read whole and reported whole, which is right for normal files but can need several times the line's size in memory, and prints the entire line for every match. Two options, both off by default, deal with it:
+
+| Option | Does |
+|--------|------|
+| `--max-line-bytes SIZE` | bounds **memory**: a longer line is searched in pieces of at most `SIZE` bytes |
+| `--snippet BYTES` | bounds the **output**: a match is shown with `BYTES` of context on each side, not the whole line |
+
+For a huge line use both:
+
+```bash
+prowlcat search example.com -t domain -p ./dumps --max-line-bytes 1M --snippet 60
+```
+
+```json
+{"query":"needle@example.com", ... "line_number":0,"byte_offset":100978876},
+ "line_text":"…er.test','pw'),('u@filler.test','pw'),('needle@example.com','pw'),('u@filler.test','pw'),('u@fille…",
+ "matched_span":[43,64], ...}
+```
+
+How it works, and what to expect:
+
+- Pieces are cut at separators (space, tab, `,` `;` `(` `)` quotes, `|`), which never occur inside an email, host name or IP address, and each piece repeats up to 256 bytes of the previous one so a match across a cut is found whole. In tests the same matches are found with and without a cap, from 4 KiB up. A match longer than 256 bytes that straddles a cut can be missed (a very long plain-text target, for instance).
+- A match is reported with the line number of its line, the byte offset of its **piece**, and, without `--snippet`, the piece as `line_text`. `matched_span` always points inside `line_text`.
+- With `--snippet`, a line that fits in the window is shown unchanged. `…` marks each side where the line goes on, and is counted in `matched_span`.
+- `--snippet` alone shortens the output but still reads the line whole; `--max-line-bytes` is what keeps memory flat. On a 381 MB single-line file, a 700 MB memory limit kills a normal search and lets `--max-line-bytes 64K` finish.
+- In the interactive interface, set `PROWLCAT_MAX_LINE_BYTES` and `PROWLCAT_SNIPPET` before starting it.
+
 **`--max-matches`** limits matches per target within each file. It is the quickest way to bound a search whose first results are enough.
 
 ## Indexing
@@ -395,6 +443,8 @@ The index covers emails, domains and IP addresses (including CIDR ranges). Plain
 | `PROWLCAT_ASCII=1` | plain ASCII glyphs and mascot |
 | `PROWLCAT_RESULT_MEM_MB` | RAM used to hold matches before they are parked in temporary files (default 256); affects memory and speed, never the results |
 | `PROWLCAT_TMP_DIR` | directory for those temporary files; by default the system temp directory, or `/var/tmp` / `~/.cache/prowlcat` when that is a RAM-backed `tmpfs` |
+| `PROWLCAT_MAX_LINE_BYTES` | default for `--max-line-bytes` (also used by the interactive interface) |
+| `PROWLCAT_SNIPPET` | default for `--snippet` (also used by the interactive interface) |
 | `PROWLCAT_LOG_FILE` | write log lines to this file while the interface is open (they would otherwise draw over it) |
 
 ## Development
@@ -408,7 +458,19 @@ cargo bench -p prowlcat-core --bench scan                  # PROWLCAT_BENCH_MB s
 
 The workspace is split into small crates: `prowlcat-source` (file enumeration), `prowlcat-decode` (line readers for every container), `prowlcat-match` (the matching engine), `prowlcat-core` (the parallel scan and the bounded result store), `prowlcat-output` (streaming writers), `prowlcat-index` (Tantivy), `prowlcat-tui` (the interface) and `prowlcat-cli` (the `prowlcat` binary). [ARCHITECTURE.md](./ARCHITECTURE.md) explains how they fit together. Changes are listed in [CHANGELOG.md](./CHANGELOG.md).
 
-Pushing a `v*` tag builds and publishes release binaries for Linux, macOS and Windows through GitHub Actions.
+### Tests and releases
+
+`cargo test --workspace` includes an end-to-end suite (`crates/prowlcat-cli/tests/e2e.rs`) that runs the real binary on a generated corpus: every container, every target type, every output format, exit codes, an index against a scan, the memory budget and spill directory, and a golden digest of a fixed corpus. `PROWLCAT_E2E_BIN` points it at another binary, which is how the release workflow tests the packaged one.
+
+The screenshots in this README are regenerated for every release, by running the real interface on a made-up corpus: after bumping the version, `cargo build --release -p prowlcat-cli && scripts/screenshots.sh` (needs `rsvg-convert`; look at the images before committing them). The release gate refuses a version whose screenshots are older.
+
+Before tagging a release, run the full gate and fix whatever it reports:
+
+```bash
+scripts/release-check.sh 0.3.0     # version, change log, screenshots, lockfile, tests, clippy, e2e on the release build, licenses
+```
+
+Pushing a `v*` tag then runs the tests on Linux, macOS and Windows, builds the four packages, runs the end-to-end suite on each packaged binary, and publishes the release only if all of that passed. The dependency licenses are checked against `deny.toml` (the project is AGPL-3.0-or-later); `scripts/gen-third-party.sh` regenerates `THIRD-PARTY-NOTICES.md`, which ships with every package.
 
 ## License
 

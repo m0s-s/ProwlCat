@@ -14,6 +14,7 @@ use tracing::warn;
 
 pub use plain::PlainReader;
 use plain::{read_lines, Counted};
+pub use plain::{MIN_MAX_LINE, PIECE_OVERLAP};
 
 /// Line reader over plaintext, compressed streams, and tar/zip archives.
 ///
@@ -26,6 +27,7 @@ pub struct LineReader {
     mmap_threshold: u64,
     passwords: Vec<String>,
     progress: Option<Arc<AtomicU64>>,
+    max_line: usize,
 }
 
 impl LineReader {
@@ -38,6 +40,7 @@ impl LineReader {
             mmap_threshold,
             passwords: Vec::new(),
             progress: None,
+            max_line: 0,
         })
     }
 
@@ -54,7 +57,30 @@ impl LineReader {
         self
     }
 
+    /// Split lines longer than `bytes` into overlapping pieces when read with
+    /// [`for_each_piece`](Self::for_each_piece), so memory stays bounded whatever the line
+    /// length. `0` (the default) keeps every line whole. Values below [`MIN_MAX_LINE`] are raised
+    /// to it.
+    pub fn with_max_line_bytes(mut self, bytes: usize) -> Self {
+        self.max_line = if bytes == 0 { 0 } else { bytes.max(MIN_MAX_LINE) };
+        self
+    }
+
+    /// Every line whole, however long (the line cap does not apply).
     pub fn for_each_line(&mut self, mut f: impl FnMut(Option<&str>, u64, u64, &[u8])) -> Result<()> {
+        self.run(0, &mut |m, n, o, _, l| f(m, n, o, l))
+    }
+
+    /// Like [`for_each_line`](Self::for_each_line), but lines longer than the cap set with
+    /// [`with_max_line_bytes`](Self::with_max_line_bytes) arrive in pieces. Callback:
+    /// `(archive_entry, line_number, byte_offset_of_piece, skip, piece)`; `skip` is how many
+    /// leading bytes of the piece the previous piece of the same line already held, so a match
+    /// wholly inside them has been seen already. Without a cap `skip` is always 0.
+    pub fn for_each_piece(&mut self, mut f: impl FnMut(Option<&str>, u64, u64, usize, &[u8])) -> Result<()> {
+        self.run(self.max_line, &mut f)
+    }
+
+    fn run(&mut self, cap: usize, f: &mut impl FnMut(Option<&str>, u64, u64, usize, &[u8])) -> Result<()> {
         let local = Arc::new(AtomicU64::new(0));
         let file = || -> Result<Counted<std::fs::File>> {
             let f = std::fs::File::open(&self.path)?;
@@ -68,15 +94,15 @@ impl LineReader {
                 self.progress.clone(),
                 local.clone(),
             )
-            .and_then(|mut p| p.for_each_line(|n, o, l| f(None, n, o, l))),
-            CompressionKind::Gzip => read_lines(GzDecoder::new(file()?), |n, o, l| f(None, n, o, l)),
+            .and_then(|mut p| p.for_each_piece(cap, |n, o, k, l| f(None, n, o, k, l))),
+            CompressionKind::Gzip => read_lines(GzDecoder::new(file()?), cap, |n, o, k, l| f(None, n, o, k, l)),
             CompressionKind::Zstd => {
                 let dec = zstd::stream::read::Decoder::new(file()?)?;
-                read_lines(dec, |n, o, l| f(None, n, o, l))
+                read_lines(dec, cap, |n, o, k, l| f(None, n, o, k, l))
             }
-            CompressionKind::Tar => scan_tar(file()?, &self.path, &mut f),
-            CompressionKind::TarGz => scan_tar(GzDecoder::new(file()?), &self.path, &mut f),
-            CompressionKind::Zip => scan_zip(file()?, &self.path, &self.passwords, &mut f),
+            CompressionKind::Tar => scan_tar(file()?, &self.path, cap, f),
+            CompressionKind::TarGz => scan_tar(GzDecoder::new(file()?), &self.path, cap, f),
+            CompressionKind::Zip => scan_zip(file()?, &self.path, &self.passwords, cap, f),
         };
         if let Some(g) = &self.progress {
             let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
@@ -90,7 +116,8 @@ impl LineReader {
 fn scan_tar<R: Read>(
     reader: R,
     path: &Path,
-    f: &mut impl FnMut(Option<&str>, u64, u64, &[u8]),
+    cap: usize,
+    f: &mut impl FnMut(Option<&str>, u64, u64, usize, &[u8]),
 ) -> Result<()> {
     let mut archive = tar::Archive::new(reader);
     for entry in archive.entries()? {
@@ -105,7 +132,7 @@ fn scan_tar<R: Read>(
             continue;
         }
         let name = entry.path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        if let Err(e) = read_lines(entry, |n, o, l| f(Some(&name), n, o, l)) {
+        if let Err(e) = read_lines(entry, cap, |n, o, k, l| f(Some(&name), n, o, k, l)) {
             warn!(path = %path.display(), member = %name, error = %e, "tar member failed");
         }
     }
@@ -118,7 +145,8 @@ fn scan_zip<R: Read + std::io::Seek>(
     reader: R,
     path: &Path,
     passwords: &[String],
-    f: &mut impl FnMut(Option<&str>, u64, u64, &[u8]),
+    cap: usize,
+    f: &mut impl FnMut(Option<&str>, u64, u64, usize, &[u8]),
 ) -> Result<()> {
     let mut archive = zip::ZipArchive::new(reader)?;
     let mut preferred: Option<usize> = None;
@@ -172,7 +200,7 @@ fn scan_zip<R: Read + std::io::Seek>(
             continue;
         }
         let name = member.name().to_string();
-        if let Err(e) = read_lines(member, |n, o, l| f(Some(&name), n, o, l)) {
+        if let Err(e) = read_lines(member, cap, |n, o, k, l| f(Some(&name), n, o, k, l)) {
             warn!(path = %path.display(), member = %name, error = %e, "zip member failed (bad password or corrupt data)");
         }
     }

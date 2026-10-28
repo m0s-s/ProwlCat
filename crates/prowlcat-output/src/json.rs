@@ -12,7 +12,16 @@ where
     I: IntoIterator<Item = Result<R>>,
     R: Borrow<ScanResult>,
 {
-    let mut out = BufWriter::new(std::fs::File::create(path)?);
+    write_json_to(std::fs::File::create(path)?, results, summary)
+}
+
+pub fn write_json_to<W, I, R>(out: W, results: I, summary: &ScanSummary) -> Result<()>
+where
+    W: Write,
+    I: IntoIterator<Item = Result<R>>,
+    R: Borrow<ScanResult>,
+{
+    let mut out = BufWriter::new(out);
     out.write_all(b"{\"results\":[")?;
     for (n, result) in results.into_iter().enumerate() {
         if n > 0 {
@@ -31,7 +40,16 @@ where
     I: IntoIterator<Item = Result<R>>,
     R: Borrow<ScanResult>,
 {
-    let mut out = BufWriter::new(std::fs::File::create(path)?);
+    write_ndjson_to(std::fs::File::create(path)?, results)
+}
+
+pub fn write_ndjson_to<W, I, R>(out: W, results: I) -> Result<()>
+where
+    W: Write,
+    I: IntoIterator<Item = Result<R>>,
+    R: Borrow<ScanResult>,
+{
+    let mut out = BufWriter::new(out);
     for result in results {
         serde_json::to_writer(&mut out, result?.borrow())?;
         out.write_all(b"\n")?;

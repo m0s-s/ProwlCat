@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use prowlcat_core::{ProgressHandle, ScanConfig, ScanOrchestrator, SortedResults, TargetParser, TypeHint};
-use prowlcat_output::{infer_format, print_results_iter, write_output_iter, OutputFormat};
+use prowlcat_output::{infer_format, print_results_iter, write_output_iter, write_stdout_iter, OutputFormat};
 use prowlcat_tui::{Start, TuiOptions};
 
 #[derive(Parser)]
@@ -28,9 +28,11 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
+    /// Log only warnings and errors
     #[arg(short, long, global = true)]
     quiet: bool,
 
+    /// Log more detail
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
 
@@ -59,6 +61,152 @@ enum Commands {
     Tui(TuiArgs),
 }
 
+/// What `-t/--type` can force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TargetType {
+    Auto,
+    Email,
+    Domain,
+    Ip,
+    Cidr,
+    Text,
+}
+
+impl From<TargetType> for TypeHint {
+    fn from(t: TargetType) -> Self {
+        match t {
+            TargetType::Auto => TypeHint::Auto,
+            TargetType::Email => TypeHint::Email,
+            TargetType::Domain => TypeHint::Domain,
+            TargetType::Ip => TypeHint::Ip,
+            TargetType::Cidr => TypeHint::Cidr,
+            TargetType::Text => TypeHint::Text,
+        }
+    }
+}
+
+/// Formats for `--format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Format {
+    Table,
+    Json,
+    #[value(alias = "jsonl")]
+    Ndjson,
+    Csv,
+}
+
+impl From<Format> for OutputFormat {
+    fn from(f: Format) -> Self {
+        match f {
+            Format::Table => OutputFormat::Table,
+            Format::Json => OutputFormat::Json,
+            Format::Ndjson => OutputFormat::Ndjson,
+            Format::Csv => OutputFormat::Csv,
+        }
+    }
+}
+
+// Options shared by several subcommands are defined once, so they read the same everywhere.
+
+/// Whether to descend into subdirectories.
+#[derive(Args)]
+#[command(next_help_heading = "Input")]
+struct Walk {
+    /// Descend into subdirectories (this is the default; accepted so existing scripts keep working)
+    #[arg(short = 'r', long)]
+    recursive: bool,
+
+    /// Do not descend into subdirectories
+    #[arg(long, conflicts_with = "recursive")]
+    no_recursive: bool,
+}
+
+impl Walk {
+    fn on(&self) -> bool {
+        !self.no_recursive
+    }
+}
+
+/// Passwords for encrypted zip archives.
+#[derive(Args)]
+#[command(next_help_heading = "Encrypted archives")]
+struct Archives {
+    /// Password to try on encrypted zip archives (repeatable; visible in the process list, prefer --password-file)
+    #[arg(long = "password", value_name = "PASSWORD")]
+    passwords: Vec<String>,
+
+    /// File with one candidate password per line
+    #[arg(long, value_name = "FILE")]
+    password_file: Option<PathBuf>,
+}
+
+impl Archives {
+    fn load(&self) -> Result<Vec<String>> {
+        load_passwords(self.passwords.clone(), self.password_file.as_deref())
+    }
+}
+
+/// Parallelism.
+#[derive(Args)]
+#[command(next_help_heading = "Limits and speed")]
+struct Workers {
+    /// Parallel worker threads (default: all cores)
+    #[arg(short = 'j', long, value_name = "N")]
+    threads: Option<usize>,
+}
+
+/// How very long lines are read and shown.
+#[derive(Args)]
+#[command(next_help_heading = "Limits and speed")]
+struct Lines {
+    /// Search lines longer than SIZE in overlapping pieces, so memory stays bounded however long a
+    /// line is (for example 64K or 1M; at least 4K; 0 = whole lines). A match is reported with the
+    /// piece it lies in. Env: PROWLCAT_MAX_LINE_BYTES
+    #[arg(long, value_name = "SIZE", value_parser = parse_size_arg)]
+    max_line_bytes: Option<usize>,
+
+    /// Report only SIZE bytes of context on each side of a match in a long line, with `…` where it
+    /// goes on (for example 60; 0 = whole lines). Lines that fit are unchanged. Env: PROWLCAT_SNIPPET
+    #[arg(long, value_name = "SIZE", value_parser = parse_size_arg)]
+    snippet: Option<usize>,
+}
+
+impl Lines {
+    /// The scan reads these from the environment, which is how the interactive interface gets
+    /// them too, so the flags are handed over the same way.
+    fn export_to_env(&self) {
+        if let Some(n) = self.max_line_bytes {
+            std::env::set_var("PROWLCAT_MAX_LINE_BYTES", n.to_string());
+        }
+        if let Some(n) = self.snippet {
+            std::env::set_var("PROWLCAT_SNIPPET", n.to_string());
+        }
+    }
+}
+
+/// What kind of thing the targets are.
+#[derive(Args)]
+#[command(next_help_heading = "Matching")]
+struct Kind {
+    /// Force the target type (default: guess from the target)
+    #[arg(short = 't', long = "type", value_enum, ignore_case = true, default_value_t = TargetType::Auto, value_name = "TYPE")]
+    target_type: TargetType,
+
+    /// Plain-text, case-insensitive substring search with no type rules (same as `-t text`)
+    #[arg(long)]
+    loose: bool,
+}
+
+impl Kind {
+    fn hint(&self) -> TypeHint {
+        if self.loose {
+            TypeHint::Text
+        } else {
+            self.target_type.into()
+        }
+    }
+}
+
 #[derive(Parser)]
 struct TuiArgs {
     /// Targets to search straight away; leave empty to start at the prompt
@@ -66,51 +214,42 @@ struct TuiArgs {
     targets: Vec<String>,
 
     /// Files, directories, or globs to scan (remembered from the last session when omitted)
-    #[arg(short = 'p', long = "path")]
+    #[arg(short = 'p', long = "path", value_name = "PATH", help_heading = "Input")]
     paths: Vec<PathBuf>,
 
     /// Search a prebuilt index instead of scanning files
-    #[arg(long, conflicts_with = "paths")]
+    #[arg(long, value_name = "DIR", conflicts_with = "paths", help_heading = "Input")]
     index: Option<PathBuf>,
 
-    /// Recurse into subdirectories
-    #[arg(short = 'r', long, default_value_t = true)]
-    recursive: bool,
+    #[command(flatten)]
+    walk: Walk,
 
-    /// Force target type: auto, email, domain, ip, cidr, text
-    #[arg(short = 't', long = "type", default_value = "auto")]
-    target_type: String,
+    #[command(flatten)]
+    kind: Kind,
 
-    /// Plain-text substring search (case-insensitive, no type inference)
-    #[arg(long)]
-    loose: bool,
-
-    /// Parallel worker threads
-    #[arg(short = 'j', long)]
-    threads: Option<usize>,
-
-    /// Max matches per target (0 = unlimited)
-    #[arg(short = 'm', long, default_value_t = 0)]
+    /// Maximum matches per target (0 = unlimited)
+    #[arg(short = 'm', long, value_name = "N", default_value_t = 0, help_heading = "Limits and speed")]
     max_matches: u64,
 
-    /// Password for encrypted zip archives (repeatable; visible in process list, prefer --password-file)
-    #[arg(long = "password")]
-    passwords: Vec<String>,
+    #[command(flatten)]
+    workers: Workers,
 
-    /// File with one candidate archive password per line
-    #[arg(long)]
-    password_file: Option<PathBuf>,
+    #[command(flatten)]
+    lines: Lines,
+
+    #[command(flatten)]
+    archives: Archives,
 
     /// Hold a still frame instead of animating Fang (also PROWLCAT_NO_ANIM=1)
-    #[arg(long)]
+    #[arg(long, help_heading = "Interface")]
     no_animation: bool,
 
     /// Skip the intro
-    #[arg(long)]
+    #[arg(long, help_heading = "Interface")]
     no_splash: bool,
 
     /// Do not remember the corpus or recent searches (also PROWLCAT_NO_HISTORY=1)
-    #[arg(long)]
+    #[arg(long, help_heading = "Interface")]
     no_history: bool,
 }
 
@@ -120,93 +259,80 @@ struct SearchArgs {
     #[arg(value_name = "TARGET")]
     targets: Vec<String>,
 
-    /// File with one target per line
-    #[arg(short = 'f', long)]
+    /// File with one target per line (blank lines and `#` comments are ignored)
+    #[arg(short = 'f', long, value_name = "FILE", help_heading = "Input")]
     targets_file: Option<PathBuf>,
 
-    /// Files, directories, or globs to scan
-    #[arg(short = 'p', long = "path", required_unless_present = "index")]
+    /// Files, directories, or globs to scan (repeatable)
+    #[arg(short = 'p', long = "path", value_name = "PATH", required_unless_present = "index", help_heading = "Input")]
     paths: Vec<PathBuf>,
 
-    /// Search a prebuilt index (see `prowlcat index`) instead of scanning files; text/--loose targets are unsupported
-    #[arg(long, conflicts_with = "paths")]
+    /// Search a prebuilt index (see `prowlcat index`) instead of scanning files; text targets are not supported
+    #[arg(long, value_name = "DIR", conflicts_with = "paths", help_heading = "Input")]
     index: Option<PathBuf>,
 
-    /// Recurse into subdirectories
-    #[arg(short = 'r', long, default_value_t = true)]
-    recursive: bool,
+    #[command(flatten)]
+    walk: Walk,
 
-    /// Force target type: auto, email, domain, ip, cidr, text
-    #[arg(short = 't', long = "type", default_value = "auto")]
-    target_type: String,
+    #[command(flatten)]
+    kind: Kind,
 
-    /// Plain-text substring search (case-insensitive, no type inference)
-    #[arg(long)]
-    loose: bool,
-
-    /// Parallel worker threads
-    #[arg(short = 'j', long)]
-    threads: Option<usize>,
-
-    /// Max matches per target (0 = unlimited)
-    #[arg(short = 'm', long, default_value_t = 0)]
+    /// Maximum matches per target (0 = unlimited)
+    #[arg(short = 'm', long, value_name = "N", default_value_t = 0, help_heading = "Limits and speed")]
     max_matches: u64,
 
-    /// Export results to file (.json, .csv, .ndjson)
-    #[arg(short = 'o', long)]
+    #[command(flatten)]
+    workers: Workers,
+
+    #[command(flatten)]
+    lines: Lines,
+
+    /// Write the results to FILE; the extension picks the format (.json, .ndjson, .csv). `-` means
+    /// standard output (NDJSON unless --format says otherwise)
+    #[arg(short = 'o', long, value_name = "FILE", help_heading = "Output")]
     output: Option<PathBuf>,
 
-    /// Output format override
-    #[arg(long)]
-    format: Option<String>,
+    /// Output format. With -o it overrides the extension; without -o the results go to standard
+    /// output in this format (default: a readable table)
+    #[arg(long, value_enum, ignore_case = true, value_name = "FORMAT", help_heading = "Output")]
+    format: Option<Format>,
 
-    /// Password for encrypted zip archives (repeatable; visible in process list, prefer --password-file)
-    #[arg(long = "password")]
-    passwords: Vec<String>,
-
-    /// File with one candidate archive password per line
-    #[arg(long)]
-    password_file: Option<PathBuf>,
-
-    /// Disable progress output
-    #[arg(long)]
+    /// Disable the banner and the progress bar
+    #[arg(long, help_heading = "Output")]
     no_progress: bool,
+
+    #[command(flatten)]
+    archives: Archives,
 }
 
 #[derive(Parser)]
 struct IndexArgs {
-    /// Files, directories, or globs to index
-    #[arg(short = 'p', long = "path", required = true)]
+    /// Files, directories, or globs to index (repeatable)
+    #[arg(short = 'p', long = "path", value_name = "PATH", required = true, help_heading = "Input")]
     paths: Vec<PathBuf>,
 
     /// Directory to create the index in (must not exist or be empty)
-    #[arg(short = 'o', long, required = true)]
+    #[arg(short = 'o', long, value_name = "DIR", required = true, help_heading = "Output")]
     output: PathBuf,
 
-    /// Recurse into subdirectories
-    #[arg(short = 'r', long, default_value_t = true)]
-    recursive: bool,
+    #[command(flatten)]
+    walk: Walk,
 
-    /// Parallel worker threads
-    #[arg(short = 'j', long)]
-    threads: Option<usize>,
+    #[command(flatten)]
+    workers: Workers,
 
-    /// Password for encrypted zip archives (repeatable)
-    #[arg(long = "password")]
-    passwords: Vec<String>,
-
-    /// File with one candidate archive password per line
-    #[arg(long)]
-    password_file: Option<PathBuf>,
+    #[command(flatten)]
+    archives: Archives,
 }
 
 #[derive(Parser)]
 struct StatsArgs {
-    #[arg(short = 'p', long = "path", required = true)]
+    /// Files, directories, or globs to count (repeatable)
+    #[arg(short = 'p', long = "path", value_name = "PATH", required = true, help_heading = "Input")]
     paths: Vec<PathBuf>,
 
-    #[arg(short = 'r', long, default_value_t = true)]
-    recursive: bool,
+    #[command(flatten)]
+    walk: Walk,
 }
 
 fn main() -> ExitCode {
@@ -241,7 +367,7 @@ fn run() -> Result<ExitCode> {
             match cli.command {
                 Some(Commands::Search(args)) => run_search(args),
                 Some(Commands::Index(args)) => run_index(args),
-                Some(Commands::Stats(args)) => commands::stats::run(args.paths, args.recursive),
+                Some(Commands::Stats(args)) => commands::stats::run(args.paths, args.walk.on()),
                 Some(Commands::Tui(_)) | None => bail!("internal error: no classic command to run"),
             }
         }
@@ -296,14 +422,14 @@ fn run_tui(command: Option<Commands>) -> Result<ExitCode> {
         Some(Commands::Search(args)) => tui_from_search(args)?,
         Some(Commands::Index(args)) => TuiOptions {
             paths: args.paths,
-            recursive: args.recursive,
-            threads: args.threads,
-            passwords: load_passwords(args.passwords, args.password_file.as_deref())?,
+            recursive: args.walk.on(),
+            threads: args.workers.threads,
+            passwords: args.archives.load()?,
             start: Start::IndexBuild(args.output),
             ..TuiOptions::default()
         },
         Some(Commands::Stats(args)) => {
-            TuiOptions { paths: args.paths, recursive: args.recursive, start: Start::Stats, ..TuiOptions::default() }
+            TuiOptions { paths: args.paths, recursive: args.walk.on(), start: Start::Stats, ..TuiOptions::default() }
         }
     };
     prowlcat_tui::run(options)?;
@@ -311,18 +437,18 @@ fn run_tui(command: Option<Commands>) -> Result<ExitCode> {
 }
 
 fn tui_from_args(args: TuiArgs) -> Result<TuiOptions> {
-    let hint = if args.loose { TypeHint::Text } else { parse_type_hint(&args.target_type)? };
+    args.lines.export_to_env();
     let start = if args.targets.is_empty() { Start::Home } else { Start::Search };
     let defaults = TuiOptions::default();
     Ok(TuiOptions {
         targets: args.targets,
-        hint,
+        hint: args.kind.hint(),
         paths: args.paths,
         index: args.index,
-        recursive: args.recursive,
-        threads: args.threads,
+        recursive: args.walk.on(),
+        threads: args.workers.threads,
         max_matches: args.max_matches,
-        passwords: load_passwords(args.passwords, args.password_file.as_deref())?,
+        passwords: args.archives.load()?,
         start,
         animate: defaults.animate && !args.no_animation,
         splash: !args.no_splash,
@@ -335,7 +461,7 @@ fn tui_from_search(args: SearchArgs) -> Result<TuiOptions> {
     if args.output.is_some() || args.format.is_some() {
         bail!("--output and --format write a file without opening the interface; use `--ui cli` for that, or press `e` on the results to export");
     }
-    let hint = if args.loose { TypeHint::Text } else { parse_type_hint(&args.target_type)? };
+    args.lines.export_to_env();
     let mut targets = args.targets;
     if let Some(file) = &args.targets_file {
         targets.extend(read_targets(file)?);
@@ -343,13 +469,13 @@ fn tui_from_search(args: SearchArgs) -> Result<TuiOptions> {
     let start = if targets.is_empty() { Start::Home } else { Start::Search };
     Ok(TuiOptions {
         targets,
-        hint,
+        hint: args.kind.hint(),
         paths: args.paths,
         index: args.index,
-        recursive: args.recursive,
-        threads: args.threads,
+        recursive: args.walk.on(),
+        threads: args.workers.threads,
         max_matches: args.max_matches,
-        passwords: load_passwords(args.passwords, args.password_file.as_deref())?,
+        passwords: args.archives.load()?,
         start,
         ..TuiOptions::default()
     })
@@ -390,16 +516,17 @@ fn log_level(verbose: u8, quiet: bool) -> &'static str {
 }
 
 fn run_search(args: SearchArgs) -> Result<ExitCode> {
-    if !args.no_progress {
+    // Data on standard output (`-o -`, or `--format json|ndjson|csv` without `-o`) must not be
+    // preceded by the banner.
+    let data_on_stdout = match (&args.output, args.format) {
+        (Some(path), _) => path.as_os_str() == "-",
+        (None, format) => format.is_some_and(|f| f != Format::Table),
+    };
+    if !args.no_progress && !data_on_stdout {
         print_banner();
     }
 
-    let hint = if args.loose {
-        TypeHint::Text
-    } else {
-        parse_type_hint(&args.target_type)?
-    };
-    let parser = TargetParser::new(hint);
+    let parser = TargetParser::new(args.kind.hint());
 
     let mut raw_targets = args.targets;
     if let Some(file) = args.targets_file {
@@ -414,17 +541,23 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
         .parse_many(raw_targets)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let passwords = load_passwords(args.passwords, args.password_file.as_deref())?;
+    let passwords = args.archives.load()?;
 
     let mut config = ScanConfig {
         passwords,
         paths: args.paths,
-        recursive: args.recursive,
+        recursive: args.walk.on(),
         max_matches_per_query: args.max_matches,
         ..ScanConfig::default()
     };
-    if let Some(t) = args.threads {
+    if let Some(t) = args.workers.threads {
         config.threads = t;
+    }
+    if let Some(n) = args.lines.max_line_bytes {
+        config.max_line_bytes = n;
+    }
+    if let Some(n) = args.lines.snippet {
+        config.snippet_bytes = n;
     }
 
     // Progress bar only on an interactive stderr, so piped/exported output stays clean.
@@ -448,16 +581,19 @@ fn run_search(args: SearchArgs) -> Result<ExitCode> {
     };
     found.summary_mut().elapsed_ms = start.elapsed().as_millis() as u64;
 
-    if let Some(path) = args.output {
-        let format = args
-            .format
-            .as_deref()
-            .map(parse_output_format)
-            .transpose()?
-            .unwrap_or_else(|| infer_format(&path));
-        write_output_iter(&path, format, found.iter(), found.summary())?;
-    } else {
-        print_results_iter(found.iter(), found.summary())?;
+    let format: Option<OutputFormat> = args.format.map(Into::into);
+    match args.output {
+        Some(path) if path.as_os_str() == "-" => {
+            write_stdout_iter(format.unwrap_or(OutputFormat::Ndjson), found.iter(), found.summary())?
+        }
+        Some(path) => {
+            let format = format.unwrap_or_else(|| infer_format(&path));
+            write_output_iter(&path, format, found.iter(), found.summary())?
+        }
+        None => match format {
+            Some(format) => write_stdout_iter(format, found.iter(), found.summary())?,
+            None => print_results_iter(found.iter(), found.summary())?,
+        },
     }
 
     Ok(if found.summary().matches > 0 {
@@ -486,10 +622,10 @@ fn run_index(args: IndexArgs) -> Result<ExitCode> {
     let defaults = ScanConfig::default();
     let cfg = prowlcat_index::IndexBuildConfig {
         paths: args.paths,
-        recursive: args.recursive,
-        threads: args.threads.unwrap_or(defaults.threads),
+        recursive: args.walk.on(),
+        threads: args.workers.threads.unwrap_or(defaults.threads),
         mmap_threshold_mb: defaults.mmap_threshold_mb,
-        passwords: load_passwords(args.passwords, args.password_file.as_deref())?,
+        passwords: args.archives.load()?,
     };
     let start = Instant::now();
     let meta = prowlcat_index::build_index(&cfg, &args.output)?;
@@ -555,26 +691,8 @@ fn init_tracing(verbose: u8, quiet: bool) {
         .try_init();
 }
 
-fn parse_type_hint(s: &str) -> Result<TypeHint> {
-    match s.to_ascii_lowercase().as_str() {
-        "auto" => Ok(TypeHint::Auto),
-        "email" => Ok(TypeHint::Email),
-        "domain" => Ok(TypeHint::Domain),
-        "ip" => Ok(TypeHint::Ip),
-        "cidr" => Ok(TypeHint::Cidr),
-        "text" => Ok(TypeHint::Text),
-        other => anyhow::bail!("unknown target type: {other}"),
-    }
-}
-
-fn parse_output_format(s: &str) -> Result<OutputFormat> {
-    match s.to_ascii_lowercase().as_str() {
-        "table" => Ok(OutputFormat::Table),
-        "json" => Ok(OutputFormat::Json),
-        "ndjson" | "jsonl" => Ok(OutputFormat::Ndjson),
-        "csv" => Ok(OutputFormat::Csv),
-        other => anyhow::bail!("unknown output format: {other}"),
-    }
+fn parse_size_arg(s: &str) -> Result<usize, String> {
+    prowlcat_core::parse_size(s).ok_or_else(|| format!("`{s}` is not a size: use a number of bytes, or 64K, 1M, 1G"))
 }
 
 const BANNER: &str = r"
@@ -689,6 +807,53 @@ mod tests {
         let cli = Cli::try_parse_from(["prowlcat", "tui"]).unwrap();
         let Some(Commands::Tui(args)) = cli.command else { panic!() };
         assert_eq!(tui_from_args(args).unwrap().start, Start::Home);
+    }
+
+    #[test]
+    fn the_same_options_mean_the_same_in_every_subcommand() {
+        let parse = |args: &[&str]| Cli::try_parse_from(["prowlcat"].iter().chain(args)).unwrap();
+        // Search, tui, index and stats all take -p/-r/--no-recursive; the first three also -j and the passwords.
+        for cmd in ["search", "tui", "index", "stats"] {
+            let mut a = vec![cmd, "-p", "/d", "-r"];
+            if cmd == "index" {
+                a.extend(["-o", "/idx"]);
+            }
+            parse(&a);
+            let mut a = vec![cmd, "-p", "/d", "--no-recursive"];
+            if cmd == "index" {
+                a.extend(["-o", "/idx"]);
+            }
+            parse(&a);
+        }
+        for cmd in ["search", "tui", "index"] {
+            let mut a = vec![cmd, "-p", "/d", "-j", "2", "--password", "x", "--password-file", "/pw"];
+            if cmd == "index" {
+                a.extend(["-o", "/idx"]);
+            }
+            parse(&a);
+        }
+        for cmd in ["search", "tui"] {
+            parse(&[cmd, "x", "-p", "/d", "-t", "domain", "-m", "5", "--max-line-bytes", "64K", "--snippet", "60"]);
+        }
+        assert!(Cli::try_parse_from(["prowlcat", "stats", "-p", "/d", "-r", "--no-recursive"]).is_err());
+    }
+
+    #[test]
+    fn recursion_is_on_unless_turned_off() {
+        let cli = Cli::try_parse_from(["prowlcat", "stats", "-p", "/d"]).unwrap();
+        let Some(Commands::Stats(a)) = cli.command else { panic!() };
+        assert!(a.walk.on());
+        let cli = Cli::try_parse_from(["prowlcat", "stats", "-p", "/d", "--no-recursive"]).unwrap();
+        let Some(Commands::Stats(a)) = cli.command else { panic!() };
+        assert!(!a.walk.on());
+    }
+
+    #[test]
+    fn line_limits_accept_sizes() {
+        let cli = Cli::try_parse_from(["prowlcat", "tui", "--max-line-bytes", "1M", "--snippet", "60"]).unwrap();
+        let Some(Commands::Tui(a)) = cli.command else { panic!() };
+        assert_eq!((a.lines.max_line_bytes, a.lines.snippet), (Some(1 << 20), Some(60)));
+        assert!(Cli::try_parse_from(["prowlcat", "tui", "--snippet", "lots"]).is_err());
     }
 
     #[test]

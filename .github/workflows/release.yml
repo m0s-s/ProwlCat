@@ -8,7 +8,40 @@ permissions:
   contents: write
 
 jobs:
+  # Nothing is built or published unless the tests and the end-to-end suite pass on every platform,
+  # and the tag matches the version in Cargo.toml and the change log.
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag, Cargo.toml, CHANGELOG.md and screenshots agree
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          top=$(sed -n 's/^## \(.*\)/\1/p' CHANGELOG.md | head -1)
+          echo "tag=$version Cargo.toml=$manifest CHANGELOG=$top"
+          shots=$(cat assets/screenshots/VERSION)
+          echo "screenshots=$shots"
+          [ "$manifest" = "$version" ] && [ "$top" = "$version" ] && [ "$shots" = "$version" ]
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        if: matrix.os == 'ubuntu-22.04'
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        if: matrix.os == 'ubuntu-22.04'
+        with:
+          command: check licenses bans sources
+
   build:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -37,7 +70,7 @@ jobs:
           mkdir "$name"
           bin=target/${{ matrix.target }}/release/prowlcat
           [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
-          cp "$bin" README.md LICENSE "$name/"
+          cp "$bin" README.md LICENSE THIRD-PARTY-NOTICES.md "$name/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$name.zip" "$name"
             asset="$name.zip"
@@ -47,16 +80,33 @@ jobs:
           fi
           sha256sum "$asset" > "$asset.sha256"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
-      - name: Smoke test the packaged binary
+      - name: Smoke test and end-to-end tests on the packaged binary
         shell: bash
         run: |
           bin="prowlcat-${GITHUB_REF_NAME}-${{ matrix.target }}/prowlcat"
           [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
           "$bin" --version
           "$bin" --ui cli --help > /dev/null
-      - uses: softprops/action-gh-release@v2
+          PROWLCAT_E2E_BIN="$GITHUB_WORKSPACE/$bin" PROWLCAT_E2E_EXPECT_VERSION="$GITHUB_REF_NAME" \
+            cargo test -p prowlcat-cli --test e2e --locked
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: ${{ matrix.target }}
+          path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
-          generate_release_notes: true
+          if-no-files-found: error
+
+  # One release, created only when every platform built and passed: never a partial one.
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

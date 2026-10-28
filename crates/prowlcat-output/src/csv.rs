@@ -9,7 +9,16 @@ where
     I: IntoIterator<Item = Result<R>>,
     R: Borrow<ScanResult>,
 {
-    let mut wtr = csv::Writer::from_path(path)?;
+    write_csv_to(std::fs::File::create(path)?, results)
+}
+
+pub fn write_csv_to<W, I, R>(out: W, results: I) -> Result<()>
+where
+    W: std::io::Write,
+    I: IntoIterator<Item = Result<R>>,
+    R: Borrow<ScanResult>,
+{
+    let mut wtr = csv::Writer::from_writer(out);
     wtr.write_record([
         "query",
         "kind",

@@ -23,5 +23,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
-      - run: cargo clippy --workspace --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         if: matrix.os == 'ubuntu-latest'
+
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources

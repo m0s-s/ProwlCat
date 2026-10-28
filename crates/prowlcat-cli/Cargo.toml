@@ -23,3 +23,8 @@ rlimit = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+flate2.workspace = true
+zstd.workspace = true
+tar.workspace = true
+zip.workspace = true
+serde_json.workspace = true

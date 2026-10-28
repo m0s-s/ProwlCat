@@ -1,0 +1,35 @@
+# Dependency policy, checked by `cargo deny` in CI and by scripts/release-check.sh.
+# ProwlCat is AGPL-3.0-or-later, so dependencies must be under licenses that can be combined
+# with it: permissive licenses and weak, file-level copyleft. Anything else fails the build
+# until someone looks at it.
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "AGPL-3.0-or-later",
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "WTFPL",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

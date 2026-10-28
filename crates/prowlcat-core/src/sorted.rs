@@ -15,6 +15,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
@@ -142,12 +143,15 @@ struct Inner {
     /// Files that failed after handing over part of their matches; those matches are ignored,
     /// as a failed file has always contributed nothing.
     dropped: HashSet<u32>,
-    spill_failed: bool,
+    /// Why results could not be parked on disk; the scan stops as soon as this is set.
+    spill_error: Option<String>,
 }
 
 /// Shared by all workers of one scan.
 pub(crate) struct Collector {
     inner: Mutex<Inner>,
+    /// Set when parking results on disk failed: workers stop instead of filling memory.
+    failed: AtomicBool,
     budget: usize,
     query_rank: Vec<u32>,
     path_rank: Vec<u32>,
@@ -156,6 +160,7 @@ pub(crate) struct Collector {
 impl Collector {
     pub(crate) fn new(entries: &[SourceEntry], queries: &[(String, QueryKind)], budget: usize) -> Self {
         Self {
+            failed: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 mem: Vec::new(),
                 mem_bytes: 0,
@@ -164,7 +169,7 @@ impl Collector {
                 total: 0,
                 partial: HashMap::new(),
                 dropped: HashSet::new(),
-                spill_failed: false,
+                spill_error: None,
             }),
             budget,
             query_rank: dense_ranks(queries, |a, b| a.0.cmp(&b.0)),
@@ -176,7 +181,16 @@ impl Collector {
         Local { collector: self, entry, buf: Vec::new(), bytes: 0, seq: 0 }
     }
 
+    /// True once results could not be parked on disk. The scan should stop: more matches would
+    /// only be held in memory.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.load(AtomicOrdering::Relaxed)
+    }
+
     fn add(&self, batch: Vec<Item>, bytes: usize, partial_of: Option<u32>) {
+        if self.failed() {
+            return;
+        }
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.total += batch.len() as u64;
         if let Some(entry) = partial_of {
@@ -184,12 +198,14 @@ impl Collector {
         }
         inner.mem.extend(batch);
         inner.mem_bytes += bytes;
-        if inner.mem_bytes > self.budget && !inner.spill_failed {
+        if inner.mem_bytes > self.budget {
             // Workers wait on this lock while the run is written, which is the point: the scan
             // slows down instead of the memory growing.
             if let Err(e) = spill(&mut inner) {
-                warn!(error = %e, "could not write results to disk; keeping them in memory");
-                inner.spill_failed = true;
+                warn!(error = %e, "could not write results to disk; stopping the search");
+                inner.spill_error = Some(format!("{e:#}"));
+                inner.mem = Vec::new();
+                self.failed.store(true, AtomicOrdering::Relaxed);
             }
         }
     }
@@ -207,11 +223,17 @@ impl Collector {
         entries: Arc<Vec<SourceEntry>>,
         queries: Vec<(String, QueryKind)>,
         mut summary: ScanSummary,
-    ) -> SortedResults {
+    ) -> Result<SortedResults> {
         let mut inner = self.inner.into_inner().unwrap_or_else(|e| e.into_inner());
+        if let Some(why) = inner.spill_error {
+            anyhow::bail!(
+                "the search was stopped because its results could not be parked on disk ({why}); \
+                 free some space or set PROWLCAT_TMP_DIR to a larger disk"
+            );
+        }
         inner.mem.sort_unstable_by_key(|i| i.key);
         summary.matches = inner.total as usize;
-        SortedResults {
+        Ok(SortedResults {
             summary,
             backing: Backing::Spilled(Box::new(Spilled {
                 mem: inner.mem,
@@ -220,7 +242,7 @@ impl Collector {
                 entries,
                 queries,
             })),
-        }
+        })
     }
 }
 
@@ -309,7 +331,8 @@ pub(crate) struct Local<'a> {
 }
 
 impl Local<'_> {
-    pub(crate) fn push(&mut self, hit: Hit) {
+    /// Returns false when the search should stop (results cannot be parked on disk).
+    pub(crate) fn push(&mut self, hit: Hit) -> bool {
         let c = self.collector;
         let key = Key {
             query: c.query_rank[hit.query_idx],
@@ -324,6 +347,7 @@ impl Local<'_> {
         if self.bytes >= LOCAL_FLUSH {
             self.flush(true);
         }
+        !c.failed()
     }
 
     fn flush(&mut self, partial: bool) {
@@ -627,7 +651,7 @@ mod tests {
             }
             l.finish();
         }
-        c.finish(entries, queries, ScanSummary::default())
+        c.finish(entries, queries, ScanSummary::default()).unwrap()
     }
 
     fn order(r: &SortedResults) -> Vec<String> {
@@ -670,7 +694,7 @@ mod tests {
         l.flush(true);
         l.push(hit(0, 2, "y"));
         l.abort();
-        let r = c.finish(entries, queries, ScanSummary::default());
+        let r = c.finish(entries, queries, ScanSummary::default()).unwrap();
         assert_eq!(r.len(), 0);
         assert!(order(&r).is_empty());
     }

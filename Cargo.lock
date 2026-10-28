@@ -1701,6 +1701,7 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "indicatif",
  "prowlcat-core",
  "prowlcat-index",
@@ -1708,9 +1709,13 @@ dependencies = [
  "prowlcat-source",
  "prowlcat-tui",
  "rlimit",
+ "serde_json",
+ "tar",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "zip",
+ "zstd",
 ]
 
 [[package]]
