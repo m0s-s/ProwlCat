@@ -27,4 +27,7 @@ flate2.workspace = true
 zstd.workspace = true
 tar.workspace = true
 zip.workspace = true
+bzip2.workspace = true
+liblzma.workspace = true
+sevenz-rust2 = { workspace = true, features = ["compress"] }
 serde_json.workspace = true

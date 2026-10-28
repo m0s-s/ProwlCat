@@ -40,6 +40,11 @@ pub struct CorpusStats {
     pub zstd: usize,
     pub tar: usize,
     pub zip: usize,
+    /// `.bz2` and `.tar.bz2`.
+    pub bzip2: usize,
+    /// `.xz` and `.tar.xz`.
+    pub xz: usize,
+    pub sevenz: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -118,9 +123,12 @@ pub fn spawn_stats(job: u64, paths: Vec<PathBuf>, recursive: bool, tx: Sender<Ms
             bytes: entries.iter().map(|e| e.size_bytes).sum(),
             plain: count(|k| k == CompressionKind::None),
             gzip: count(|k| k == CompressionKind::Gzip),
-            zstd: count(|k| k == CompressionKind::Zstd),
+            zstd: count(|k| matches!(k, CompressionKind::Zstd | CompressionKind::TarZst)),
             tar: count(|k| matches!(k, CompressionKind::Tar | CompressionKind::TarGz)),
             zip: count(|k| k == CompressionKind::Zip),
+            bzip2: count(|k| matches!(k, CompressionKind::Bzip2 | CompressionKind::TarBz2)),
+            xz: count(|k| matches!(k, CompressionKind::Xz | CompressionKind::TarXz)),
+            sevenz: count(|k| k == CompressionKind::SevenZ),
         }))
     });
 }

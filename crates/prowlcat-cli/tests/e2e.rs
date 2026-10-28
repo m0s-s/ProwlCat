@@ -472,6 +472,138 @@ fn format_without_a_file_writes_to_standard_output() {
     assert_eq!((none.code, none.stdout.as_str()), (1, ""));
 }
 
+// ---- bzip2, xz, 7z and the tar variants ----
+
+fn bz2(data: &[u8]) -> Vec<u8> {
+    let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+    e.write_all(data).unwrap();
+    e.finish().unwrap()
+}
+
+fn xz(data: &[u8]) -> Vec<u8> {
+    let mut e = liblzma::write::XzEncoder::new(Vec::new(), 1);
+    e.write_all(data).unwrap();
+    e.finish().unwrap()
+}
+
+fn seven(members: &[(&str, &str)], password: Option<&str>) -> Vec<u8> {
+    use sevenz_rust2::{encoder_options, ArchiveEntry, ArchiveWriter};
+    let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+    if let Some(p) = password {
+        w.set_content_methods(vec![
+            encoder_options::AesEncoderOptions::new(p.into()).into(),
+            encoder_options::Lzma2Options::from_level(1).into(),
+        ]);
+    }
+    for (name, body) in members {
+        w.push_archive_entry(ArchiveEntry::new_file(name), Some(body.as_bytes())).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// One file per container kind that is not in `corpus()`, each holding an email of its own.
+fn more_containers() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    fs::write(p.join("one.txt.bz2"), bz2(b"bz@example.com:p\n")).unwrap();
+    // pbzip2 and `cat a.bz2 b.bz2` make files of several streams: every one must be read.
+    fs::write(p.join("multi.txt.bz2"), [bz2(b"bzfirst@example.com:p\n"), bz2(b"bzsecond@example.com:p\n")].concat()).unwrap();
+    fs::write(p.join("one.txt.xz"), xz(b"xz@example.com:p\n")).unwrap();
+    fs::write(p.join("multi.txt.xz"), [xz(b"xzfirst@example.com:p\n"), xz(b"xzsecond@example.com:p\n")].concat()).unwrap();
+    let tar = tar_of(&[("inner/a.txt", "tar@example.com:p\n"), ("inner/b.txt", "other line\n")]);
+    fs::write(p.join("bundle.tar.bz2"), bz2(&tar)).unwrap();
+    fs::write(p.join("bundle.tar.xz"), xz(&tar)).unwrap();
+    fs::write(p.join("bundle.tar.zst"), zstd::encode_all(&tar[..], 1).unwrap()).unwrap();
+    fs::write(p.join("alias.tbz2"), bz2(&tar)).unwrap();
+    fs::write(p.join("alias.txz"), xz(&tar)).unwrap();
+    fs::write(p.join("open.7z"), seven(&[("s/one.txt", "sz@example.com:p\n"), ("s/two.txt", "sztwo@example.com:p\n")], None)).unwrap();
+    fs::write(p.join("locked.7z"), seven(&[("secret.txt", "szlocked@example.com:p\n")], Some("s3cret"))).unwrap();
+    // Recognised by what is inside, not by the name.
+    fs::write(p.join("mystery.bin"), bz2(b"mysterybz@example.com:p\n")).unwrap();
+    fs::write(p.join("blob.dat"), xz(b"blobxz@example.com:p\n")).unwrap();
+    fs::write(p.join("passwords.txt"), "wrong\ns3cret\n").unwrap();
+    dir
+}
+
+#[test]
+fn bzip2_xz_7z_and_the_tar_variants_are_searched() {
+    let c = more_containers();
+    let d = c.path();
+    let cases: &[(&str, &str, Option<&str>)] = &[
+        ("bz@example.com", "one.txt.bz2", None),
+        ("bzfirst@example.com", "multi.txt.bz2", None),
+        ("bzsecond@example.com", "multi.txt.bz2", None),
+        ("xz@example.com", "one.txt.xz", None),
+        ("xzfirst@example.com", "multi.txt.xz", None),
+        ("xzsecond@example.com", "multi.txt.xz", None),
+        ("tar@example.com", "bundle.tar.bz2", Some("inner/a.txt")),
+        ("tar@example.com", "bundle.tar.xz", Some("inner/a.txt")),
+        ("tar@example.com", "bundle.tar.zst", Some("inner/a.txt")),
+        ("tar@example.com", "alias.tbz2", Some("inner/a.txt")),
+        ("tar@example.com", "alias.txz", Some("inner/a.txt")),
+        ("sz@example.com", "open.7z", Some("s/one.txt")),
+        ("sztwo@example.com", "open.7z", Some("s/two.txt")),
+        ("mysterybz@example.com", "mystery.bin", None),
+        ("blobxz@example.com", "blob.dat", None),
+    ];
+    for (target, file, member) in cases {
+        let (code, rows) = search(d, &[target, "-p", file]);
+        assert_eq!((code, rows.len()), (0, 1), "{target} in {file}");
+        assert!(path_of(&rows[0]).ends_with(file), "{:?}", rows[0]);
+        assert_eq!(rows[0]["source"]["archive_entry"].as_str(), *member, "{target} in {file}");
+    }
+    // A tar inside a stream is read as a tar: its text is not searched as one blob.
+    let (_, rows) = search(d, &["other line", "-t", "text", "-p", "bundle.tar.bz2"]);
+    assert_eq!(rows[0]["source"]["archive_entry"], "inner/b.txt");
+}
+
+#[test]
+fn an_encrypted_7z_needs_a_candidate_password() {
+    let c = more_containers();
+    let d = c.path();
+    let (code, rows) = search(d, &["szlocked@example.com", "-p", "locked.7z"]);
+    assert_eq!((code, rows.len()), (1, 0), "no password");
+    let (code, rows) = search(d, &["szlocked@example.com", "-p", "locked.7z", "--password", "wrong"]);
+    assert_eq!((code, rows.len()), (1, 0), "wrong password");
+    // An archive that could not be read is reported, not silently counted as "nothing found".
+    let o = run(d, &["search", "szlocked@example.com", "-p", "locked.7z", "--no-progress"]);
+    assert!(o.stdout.contains("warnings: 1 files failed"), "{}", o.stdout);
+    let (code, rows) = search(d, &["szlocked@example.com", "-p", "locked.7z", "--password-file", "passwords.txt"]);
+    assert_eq!((code, rows.len()), (0, 1), "password file");
+    assert_eq!(rows[0]["source"]["archive_entry"], "secret.txt");
+    let (code, rows) = search(d, &["sz@example.com", "-p", "open.7z", "--password", "unused"]);
+    assert_eq!((code, rows.len()), (0, 1), "a password that is not needed is harmless");
+}
+
+#[test]
+fn an_index_covers_the_new_containers() {
+    let c = more_containers();
+    let d = c.path();
+    let src = d.join("indexed");
+    fs::create_dir(&src).unwrap();
+    for f in ["one.txt.bz2", "one.txt.xz", "bundle.tar.xz", "open.7z"] {
+        fs::copy(d.join(f), src.join(f)).unwrap();
+    }
+    let o = run(d, &["index", "-p", "indexed", "-o", "idx"]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(o.stderr.contains("(0 files failed)"), "{}", o.stderr);
+    for (target, file) in [("bz@example.com", "one.txt.bz2"), ("xz@example.com", "one.txt.xz"), ("tar@example.com", "bundle.tar.xz"), ("sz@example.com", "open.7z")] {
+        let (code, rows) = search(d, &[target, "--index", "idx"]);
+        assert_eq!((code, rows.len()), (0, 1), "{target}");
+        assert!(path_of(&rows[0]).ends_with(file), "{:?}", rows[0]);
+    }
+}
+
+#[test]
+fn stats_counts_the_new_kinds() {
+    let c = more_containers();
+    let o = run(c.path(), &["stats", "-p", "."]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    for want in ["bzip2:      5", "xz:         5", "7z:         2", "zstd:       1", "tar/tar.gz: 0"] {
+        assert!(o.stdout.contains(want), "missing {want:?} in\n{}", o.stdout);
+    }
+}
+
 #[test]
 fn max_matches_caps_each_target() {
     let c = corpus();

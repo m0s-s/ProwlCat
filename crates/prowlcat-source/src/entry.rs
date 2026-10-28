@@ -11,7 +11,22 @@ pub enum CompressionKind {
     TarGz,
     Tar,
     Zip,
-    // Xz, Bzip2 — later
+    Bzip2,
+    Xz,
+    TarBz2,
+    TarXz,
+    TarZst,
+    SevenZ,
+}
+
+impl CompressionKind {
+    /// A container of many files (tar, zip, 7z) rather than one compressed stream.
+    pub fn is_archive(self) -> bool {
+        matches!(
+            self,
+            Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::TarZst | Self::Zip | Self::SevenZ
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,35 +58,65 @@ pub fn detect_compression(path: &Path) -> CompressionKind {
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+    let ends = |suffixes: &[&str]| suffixes.iter().any(|s| name.ends_with(s));
+    if ends(&[".tar.gz", ".tgz"]) {
         return CompressionKind::TarGz;
     }
-    if name.ends_with(".tar") {
+    if ends(&[".tar.bz2", ".tbz2", ".tbz"]) {
+        return CompressionKind::TarBz2;
+    }
+    if ends(&[".tar.xz", ".txz"]) {
+        return CompressionKind::TarXz;
+    }
+    if ends(&[".tar.zst", ".tar.zstd", ".tzst"]) {
+        return CompressionKind::TarZst;
+    }
+    if ends(&[".tar"]) {
         return CompressionKind::Tar;
     }
-    if name.ends_with(".zip") {
+    if ends(&[".zip"]) {
         return CompressionKind::Zip;
     }
-    if name.ends_with(".zst") || name.ends_with(".zstd") {
+    if ends(&[".7z"]) {
+        return CompressionKind::SevenZ;
+    }
+    if ends(&[".zst", ".zstd"]) {
         return CompressionKind::Zstd;
     }
-    if name.ends_with(".gz") || name.ends_with(".gzip") {
+    if ends(&[".gz", ".gzip"]) {
         return CompressionKind::Gzip;
+    }
+    if ends(&[".bz2", ".bzip2"]) {
+        return CompressionKind::Bzip2;
+    }
+    if ends(&[".xz"]) {
+        return CompressionKind::Xz;
     }
 
     // Magic bytes
     if let Ok(mut f) = std::fs::File::open(path) {
         use std::io::Read;
-        let mut buf = [0u8; 4];
+        let mut buf = [0u8; 6];
         let n = f.read(&mut buf).unwrap_or(0);
-        if n >= 2 && buf[..2] == [0x1f, 0x8b] {
+        let head = &buf[..n];
+        if head.starts_with(&[0x1f, 0x8b]) {
             return CompressionKind::Gzip;
         }
-        if n == 4 && buf == [0x28, 0xb5, 0x2f, 0xfd] {
+        if head.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
             return CompressionKind::Zstd;
         }
-        if n == 4 && buf == [0x50, 0x4b, 0x03, 0x04] {
+        if head.starts_with(&[0x50, 0x4b, 0x03, 0x04]) {
             return CompressionKind::Zip;
+        }
+        if head.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]) {
+            return CompressionKind::SevenZ;
+        }
+        if head.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
+            return CompressionKind::Xz;
+        }
+        // "BZh" and a block size digit: plain text rarely starts that way.
+        if head.len() >= 4 && head.starts_with(b"BZh") && (b'1'..=b'9').contains(&head[3]) {
+            return CompressionKind::Bzip2;
         }
     }
 

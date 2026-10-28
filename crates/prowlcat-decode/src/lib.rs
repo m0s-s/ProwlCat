@@ -2,7 +2,7 @@
 
 mod plain;
 
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -100,8 +100,18 @@ impl LineReader {
                 let dec = zstd::stream::read::Decoder::new(file()?)?;
                 read_lines(dec, cap, |n, o, k, l| f(None, n, o, k, l))
             }
+            CompressionKind::Bzip2 => {
+                read_lines(bzip2::read::MultiBzDecoder::new(file()?), cap, |n, o, k, l| f(None, n, o, k, l))
+            }
+            CompressionKind::Xz => {
+                read_lines(liblzma::read::XzDecoder::new_multi_decoder(file()?), cap, |n, o, k, l| f(None, n, o, k, l))
+            }
             CompressionKind::Tar => scan_tar(file()?, &self.path, cap, f),
             CompressionKind::TarGz => scan_tar(GzDecoder::new(file()?), &self.path, cap, f),
+            CompressionKind::TarBz2 => scan_tar(bzip2::read::MultiBzDecoder::new(file()?), &self.path, cap, f),
+            CompressionKind::TarXz => scan_tar(liblzma::read::XzDecoder::new_multi_decoder(file()?), &self.path, cap, f),
+            CompressionKind::TarZst => scan_tar(zstd::stream::read::Decoder::new(file()?)?, &self.path, cap, f),
+            CompressionKind::SevenZ => scan_7z(&file, &self.path, &self.passwords, cap, f),
             CompressionKind::Zip => scan_zip(file()?, &self.path, &self.passwords, cap, f),
         };
         if let Some(g) = &self.progress {
@@ -205,4 +215,58 @@ fn scan_zip<R: Read + std::io::Seek>(
         }
     }
     Ok(())
+}
+
+/// Walk a 7z archive. The archive is tried with no password first and then with each candidate
+/// password in turn: a wrong or missing one makes opening fail (encrypted headers) or the first
+/// member fail to decode, before any line has been handed over, and the next one is tried.
+fn scan_7z<R: Read + Seek>(
+    open: &dyn Fn() -> Result<R>,
+    path: &Path,
+    passwords: &[String],
+    cap: usize,
+    f: &mut impl FnMut(Option<&str>, u64, u64, usize, &[u8]),
+) -> Result<()> {
+    use sevenz_rust2::{ArchiveReader, Error as SevenZError, Password};
+
+    let mut candidates = vec![Password::empty()];
+    candidates.extend(passwords.iter().map(|p| Password::new(p)));
+    let tries = candidates.len();
+    let mut last: Option<SevenZError> = None;
+    for (n, password) in candidates.into_iter().enumerate() {
+        let mut delivered = false;
+        let outcome = ArchiveReader::new(open()?, password).and_then(|mut archive| {
+            archive.for_each_entries(|entry, reader| {
+                if entry.is_directory() || entry.is_anti_item() {
+                    return Ok(true);
+                }
+                let name = entry.name().to_string();
+                let read = read_lines(reader, cap, |ln, off, skip, line| {
+                    delivered = true;
+                    f(Some(&name), ln, off, skip, line)
+                });
+                match read {
+                    Ok(()) => Ok(true),
+                    Err(e) => Err(match e.downcast::<std::io::Error>() {
+                        Ok(io) => SevenZError::from(io),
+                        Err(other) => SevenZError::Other(other.to_string().into()),
+                    }),
+                }
+            })
+        });
+        match outcome {
+            Ok(()) => return Ok(()),
+            // Nothing delivered yet and another password to try: this one was wrong.
+            Err(e) if !delivered && n + 1 < tries => last = Some(e),
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "7z archive failed (bad password or corrupt data)");
+                return Err(anyhow::anyhow!("7z archive {}: {e}", path.display()));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "7z archive {}: {}",
+        path.display(),
+        last.map_or_else(|| "unreadable".to_string(), |e| e.to_string())
+    ))
 }

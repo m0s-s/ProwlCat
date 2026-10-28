@@ -38,6 +38,9 @@ flate2 = "1"
 zstd = "0.13"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+bzip2 = "0.6"
+liblzma = "0.4"
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["aes256", "bzip2", "ppmd", "deflate"] }
 memmap2 = "0.9"
 criterion = { version = "0.5", default-features = false }
 csv = "1"

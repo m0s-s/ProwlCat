@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/m0s-s/ProwlCat)](https://github.com/m0s-s/ProwlCat/releases)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
-**A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.zst`, `.tar`, `.tar.gz`, `.zip`) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
+**A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.bz2`, `.xz`, `.zst`, `.zip`, `.7z`, `.tar` and its compressed forms) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
 
 <p align="center">
   <img src="assets/screenshots/tui-home.png" alt="ProwlCat interactive interface: the home screen with Fang, the mascot" width="860">
@@ -229,8 +229,13 @@ ProwlCat stats
   zstd:       0
   tar/tar.gz: 0
   zip:        0
+  bzip2:      0
+  xz:         0
+  7z:         0
   total size: 0.00 GB
 ```
+
+`bzip2`, `xz` and `zstd` count the files of that kind, tarballs included (`.tar.bz2`, `.tar.xz`, `.tar.zst`); `tar/tar.gz` counts `.tar` and `.tar.gz`.
 
 ### Examples
 
@@ -311,9 +316,11 @@ It does not match longer names such as `example.community` or `notexample.com`.
 | Format | Notes |
 |--------|-------|
 | plain text | large files are memory-mapped |
-| `.gz`, `.zst` | streamed |
-| `.tar`, `.tar.gz` | each entry is scanned; matches show the entry name |
-| `.zip` | including encrypted archives, with the passwords you provide |
+| `.gz`, `.bz2`, `.xz`, `.zst` | streamed; files made of several streams (`pbzip2`, `cat a.xz b.xz`) are read to the end |
+| `.tar`, `.tar.gz`, `.tar.bz2` (`.tbz2`), `.tar.xz` (`.txz`), `.tar.zst` | each entry is scanned; matches show the entry name |
+| `.zip`, `.7z` | each member is scanned; encrypted archives are opened with the passwords you provide (`--password`, `--password-file`), tried in order |
+
+The format is recognised from the name and, for a file with another name (`dump.bin`), from its first bytes (gzip, bzip2, xz, zstd, zip, 7z). A `.7z` or `.zip` that cannot be opened (missing or wrong password, damage) counts as a failed file: the table says `warnings: N files failed` and the log names it. `.rar` is not read yet.
 
 Matches are always reported in a stable order: by target, then file path, then line number.
 
