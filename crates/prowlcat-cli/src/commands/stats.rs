@@ -1,14 +1,21 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use prowlcat_source::SourceEnumerator;
+use prowlcat_source::{CompressionKind as K, SourceEnumerator};
 
-pub fn run(paths: Vec<PathBuf>, recursive: bool, check: bool, passwords: &[String]) -> Result<std::process::ExitCode> {
+pub fn run(paths: Vec<PathBuf>, recursive: bool, check: bool, passwords: &[String], structured: bool) -> Result<std::process::ExitCode> {
     let enumerator = SourceEnumerator::new(&paths, recursive)?;
-    let entries = enumerator.collect()?;
+    let mut entries = enumerator.collect()?;
+    if !structured {
+        // Read as plain bytes, so counted and checked as plain files.
+        for e in &mut entries {
+            if matches!(e.compression, K::Sqlite | K::Bson | K::JsonArray) {
+                e.compression = K::None;
+            }
+        }
+    }
 
     let total_bytes: u64 = entries.iter().map(|e| e.size_bytes).sum();
-    use prowlcat_source::CompressionKind as K;
     let count = |f: fn(K) -> bool| entries.iter().filter(|e| f(e.compression)).count();
     let plain = count(|k| k == K::None);
     let gz = count(|k| k == K::Gzip);

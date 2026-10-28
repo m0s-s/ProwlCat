@@ -868,6 +868,48 @@ fn an_index_covers_a_sqlite_database() {
     assert_eq!(rows[0]["source"]["archive_entry"], "users");
 }
 
+// ---- the table, as a file; formats on index and stats ----
+
+#[test]
+fn the_table_can_be_written_to_a_file_and_never_panics_on_wide_characters() {
+    let c = corpus();
+    let d = c.path();
+    let wide = tempfile::tempdir().unwrap();
+    fs::write(wide.path().join("w.txt"), format!("wide@example.com:{}\n", "я漢é".repeat(120))).unwrap();
+    let o = run(wide.path(), &["search", "wide@example.com", "-p", "w.txt", "--no-progress"]);
+    assert_eq!(o.code, 0, "a line cut inside a character: {} {}", o.stdout.len(), o.stderr);
+    assert!(o.stdout.contains("…"));
+
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("table.txt");
+    let o = run(d, &["search", "alice@example.com", "-p", "plain.txt", "--no-progress", "-o", file.to_str().unwrap(), "--format", "table"]);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(o.stdout.is_empty(), "nothing on standard output when a file was asked for: {}", o.stdout);
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("ProwlCat | 1 targets") && text.contains("[email] alice@example.com"), "{text}");
+}
+
+#[test]
+fn formats_text_applies_to_index_and_stats_as_well() {
+    let c = structured_corpus();
+    let d = c.path();
+    let count = |args: &[&str], key: &str| -> u32 {
+        let o = run(d, args);
+        let line = o.stdout.lines().find(|l| l.trim_start().starts_with(key)).unwrap_or_else(|| panic!("{}", o.stdout));
+        line.split_whitespace().last().unwrap().parse().unwrap()
+    };
+    assert_eq!(count(&["stats", "-p", "."], "sqlite:"), 2, "leak.sqlite and renamed.dat");
+    assert_eq!(count(&["stats", "-p", ".", "--formats", "text"], "sqlite:"), 0, "counted as plain files");
+    assert!(count(&["stats", "-p", ".", "--formats", "text"], "plaintext:") >= 5);
+
+    let src = d.join("dbonly");
+    fs::create_dir(&src).unwrap();
+    fs::copy(d.join("leak.sqlite"), src.join("leak.sqlite")).unwrap();
+    assert_eq!(run(d, &["index", "-p", "dbonly", "-o", "idx-text", "--formats", "text"]).code, 0);
+    let (_, rows) = search(d, &["alice@example.com", "--index", "idx-text"]);
+    assert!(rows.iter().all(|r| r["source"]["archive_entry"].is_null()), "indexed as raw bytes: no tables");
+}
+
 // ---- --extract, --unique, --mask ----
 
 fn combo_corpus() -> tempfile::TempDir {

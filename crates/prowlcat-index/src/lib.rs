@@ -75,6 +75,8 @@ pub struct IndexBuildConfig {
     pub threads: usize,
     pub mmap_threshold_mb: u64,
     pub passwords: Vec<String>,
+    /// Read SQLite databases, BSON dumps and JSON arrays record by record (see `LineReader`).
+    pub structured: bool,
 }
 
 fn ipv6(ip: IpAddr) -> Ipv6Addr {
@@ -109,7 +111,9 @@ pub fn build_index(cfg: &IndexBuildConfig, out: &Path) -> Result<IndexMeta> {
             let mut ips = HashSet::new();
             let mut run = || -> Result<()> {
                 let mut reader =
-                    LineReader::open(&entry.path, entry.compression, mmap_threshold)?.with_passwords(&cfg.passwords);
+                    LineReader::open(&entry.path, entry.compression, mmap_threshold)?
+                        .with_passwords(&cfg.passwords)
+                        .with_structured(cfg.structured);
                 let path = entry.path.to_string_lossy().into_owned();
                 reader.for_each_line(|member, line_no, offset, line| {
                     lines.fetch_add(1, Ordering::Relaxed);
@@ -117,7 +121,7 @@ pub fn build_index(cfg: &IndexBuildConfig, out: &Path) -> Result<IndexMeta> {
                     if tokens.is_empty() && ips.is_empty() {
                         return;
                     }
-                    let entry_name = member.map(str::to_string).or_else(|| entry.archive_entry.clone());
+                    let entry_name = member.map(str::to_string);
                     let mut d = doc!(
                         f.path => path.as_str(),
                         f.line_no => line_no,
@@ -315,6 +319,7 @@ mod tests {
             threads: 2,
             mmap_threshold_mb: 0,
             passwords: Vec::new(),
+            structured: true,
         };
         build_index(&cfg, out).unwrap()
     }
@@ -367,6 +372,7 @@ mod tests {
             threads: 1,
             mmap_threshold_mb: 0,
             passwords: Vec::new(),
+            structured: true,
         };
         assert!(build_index(&cfg, &index_dir).is_err());
     }

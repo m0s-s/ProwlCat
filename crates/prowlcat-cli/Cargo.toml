@@ -12,7 +12,6 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 indicatif.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
 prowlcat-core = { path = "../prowlcat-core" }
 prowlcat-output = { path = "../prowlcat-output" }

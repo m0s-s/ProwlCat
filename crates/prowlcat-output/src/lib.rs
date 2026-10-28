@@ -16,7 +16,7 @@ use anyhow::Result;
 use prowlcat_types::{ScanResult, ScanSummary};
 
 pub use records::write_records_to;
-pub use terminal::{print_results, print_results_iter};
+pub use terminal::{print_results, print_results_iter, write_table};
 
 pub enum OutputFormat {
     Table,
@@ -44,7 +44,7 @@ where
         OutputFormat::Json => json::write_json(path, results, summary),
         OutputFormat::Ndjson => json::write_ndjson(path, results),
         OutputFormat::Csv => csv::write_csv(path, results),
-        OutputFormat::Table => print_results_iter(results, summary),
+        OutputFormat::Table => terminal::write_table(std::fs::File::create(path)?, results, summary),
     }
 }
 

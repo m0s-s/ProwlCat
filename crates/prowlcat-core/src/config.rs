@@ -33,10 +33,8 @@ pub struct ScanConfig {
     pub threads: usize,
     pub mmap_threshold_mb: u64,
     pub max_matches_per_query: u64,
-    pub context_bytes: usize,
     pub include_subdomains: bool,
-    pub hide_secrets: bool,
-    /// Candidate passwords for encrypted zip archives.
+    /// Candidate passwords for encrypted zip, 7z and rar archives.
     pub passwords: Vec<String>,
     /// Optional live progress counters.
     pub progress: Option<ProgressHandle>,
@@ -98,9 +96,7 @@ impl Default for ScanConfig {
                 .unwrap_or(4),
             mmap_threshold_mb: 64,
             max_matches_per_query: 0,
-            context_bytes: 0,
             include_subdomains: true,
-            hide_secrets: false,
             passwords: Vec::new(),
             progress: None,
             result_memory_mb: default_result_memory_mb(),

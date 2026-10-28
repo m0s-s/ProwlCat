@@ -272,7 +272,7 @@ fn scan_entry(
             let hit = Hit {
                 query_idx: idx,
                 match_kind: hit.match_kind,
-                archive_entry: member.map(str::to_string).or_else(|| entry.archive_entry.clone()),
+                archive_entry: member.map(str::to_string),
                 line_number: line_no,
                 byte_offset: offset,
                 line_text,

@@ -155,6 +155,7 @@ pub fn spawn_index_build(
             threads: threads.unwrap_or(defaults.threads),
             mmap_threshold_mb: defaults.mmap_threshold_mb,
             passwords,
+            structured: defaults.structured,
         };
         let start = Instant::now();
         let meta = prowlcat_index::build_index(&cfg, &out)?;

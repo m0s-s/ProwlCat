@@ -621,7 +621,6 @@ mod tests {
             path: PathBuf::from(path),
             compression: prowlcat_source::CompressionKind::None,
             size_bytes: 0,
-            archive_entry: None,
         }
     }
 

@@ -6,8 +6,6 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-thiserror.workspace = true
-bstr.workspace = true
 flate2.workspace = true
 zstd.workspace = true
 tar.workspace = true

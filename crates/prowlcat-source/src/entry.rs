@@ -42,8 +42,6 @@ pub struct SourceEntry {
     pub path: PathBuf,
     pub compression: CompressionKind,
     pub size_bytes: u64,
-    /// Set when the entry is inside a tar/zip archive (future)
-    pub archive_entry: Option<String>,
 }
 
 impl SourceEntry {
@@ -54,7 +52,6 @@ impl SourceEntry {
             path,
             compression,
             size_bytes: meta.len(),
-            archive_entry: None,
         })
     }
 }

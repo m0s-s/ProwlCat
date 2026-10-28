@@ -114,7 +114,7 @@ impl From<Format> for OutputFormat {
 #[derive(Args)]
 #[command(next_help_heading = "Input")]
 struct Walk {
-    /// Descend into subdirectories (this is the default; accepted so existing scripts keep working)
+    /// Descend into subdirectories (the default)
     #[arg(short = 'r', long)]
     recursive: bool,
 
@@ -133,7 +133,7 @@ impl Walk {
 #[derive(Args)]
 #[command(next_help_heading = "Encrypted archives")]
 struct Archives {
-    /// Password to try on encrypted zip archives (repeatable; visible in the process list, prefer --password-file)
+    /// Password to try on encrypted zip, 7z and rar archives (repeatable; visible in the process list, prefer --password-file)
     #[arg(long = "password", value_name = "PASSWORD")]
     passwords: Vec<String>,
 
@@ -151,9 +151,7 @@ impl Archives {
 /// How databases and dumps are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum FormatsMode {
-    /// SQLite databases, BSON dumps and JSON arrays are read record by record
     Auto,
-    /// every file is read as the plain bytes it is
     Text,
 }
 
@@ -168,6 +166,11 @@ struct Reading {
 }
 
 impl Reading {
+    /// Whether databases and dumps are read record by record: the flag, else `PROWLCAT_FORMATS`.
+    fn structured(&self) -> bool {
+        self.formats.map_or_else(|| ScanConfig::default().structured, |m| m == FormatsMode::Auto)
+    }
+
     fn export_to_env(&self) {
         if let Some(mode) = self.formats {
             std::env::set_var("PROWLCAT_FORMATS", if mode == FormatsMode::Text { "text" } else { "auto" });
@@ -372,6 +375,9 @@ struct IndexArgs {
     walk: Walk,
 
     #[command(flatten)]
+    reading: Reading,
+
+    #[command(flatten)]
     workers: Workers,
 
     #[command(flatten)]
@@ -393,6 +399,9 @@ struct StatsArgs {
 
     #[command(flatten)]
     walk: Walk,
+
+    #[command(flatten)]
+    reading: Reading,
 
     /// Also open every file, without searching it, and report which ones a search could not read
     /// (encrypted without a password that fits, a RAR with no program to read it, damaged, or not
@@ -438,7 +447,7 @@ fn run() -> Result<ExitCode> {
                 Some(Commands::Index(args)) => run_index(args),
                 Some(Commands::Stats(args)) => {
                     let passwords = args.archives.load()?;
-                    commands::stats::run(args.paths, args.walk.on(), args.check, &passwords)
+                    commands::stats::run(args.paths, args.walk.on(), args.check, &passwords, args.reading.structured())
                 }
                 Some(Commands::Hashid(args)) => commands::hashid::run(args.hashes),
                 Some(Commands::Tui(_)) | None => bail!("internal error: no classic command to run"),
@@ -787,6 +796,7 @@ fn run_index(args: IndexArgs) -> Result<ExitCode> {
         threads: args.workers.threads.unwrap_or(defaults.threads),
         mmap_threshold_mb: defaults.mmap_threshold_mb,
         passwords: args.archives.load()?,
+        structured: args.reading.structured(),
     };
     let start = Instant::now();
     let meta = prowlcat_index::build_index(&cfg, &args.output)?;
@@ -997,6 +1007,50 @@ mod tests {
             parse(&[cmd, "x", "-p", "/d", "-t", "domain", "-m", "5", "--max-line-bytes", "64K", "--snippet", "60"]);
         }
         assert!(Cli::try_parse_from(["prowlcat", "stats", "-p", "/d", "-r", "--no-recursive"]).is_err());
+    }
+
+    /// The same option must read the same wherever it appears: the help is written once.
+    #[test]
+    fn shared_options_have_the_same_help_in_every_subcommand() {
+        let cli = Cli::command();
+        let shared = [
+            "recursive", "no_recursive", "threads", "passwords", "password_file", "formats", "max_line_bytes", "snippet",
+            "target_type", "loose", "max_matches",
+        ];
+        for id in shared {
+            let mut seen: Vec<(String, String, Vec<String>)> = Vec::new();
+            for sub in cli.get_subcommands() {
+                if let Some(arg) = sub.get_arguments().find(|a| a.get_id() == id) {
+                    let help = arg.get_long_help().or(arg.get_help()).map(|h| h.to_string()).unwrap_or_default();
+                    let names = arg.get_long().map(|l| vec![format!("--{l}")]).unwrap_or_default();
+                    seen.push((sub.get_name().to_string(), help, names));
+                }
+            }
+            assert!(seen.len() >= 2, "{id} is not shared any more? {seen:?}");
+            assert!(seen.iter().all(|(_, h, _)| !h.is_empty()), "{id} has no help somewhere: {seen:?}");
+            for pair in seen.windows(2) {
+                assert_eq!(pair[0].1, pair[1].1, "`{id}` reads differently in `{}` and `{}`", pair[0].0, pair[1].0);
+                assert_eq!(pair[0].2, pair[1].2, "`{id}` is spelled differently in `{}` and `{}`", pair[0].0, pair[1].0);
+            }
+        }
+    }
+
+    #[test]
+    fn every_option_has_a_help_text_and_a_group() {
+        let cli = Cli::command();
+        for sub in cli.get_subcommands().filter(|s| s.get_name() != "help") {
+            for arg in sub.get_arguments() {
+                let id = arg.get_id().as_str();
+                if id == "help" || id == "version" {
+                    continue;
+                }
+                assert!(arg.get_help().is_some() || arg.get_long_help().is_some(), "`{}` {id} has no help", sub.get_name());
+                if arg.is_positional() || matches!(id, "quiet" | "verbose" | "ui") {
+                    continue;
+                }
+                assert!(arg.get_help_heading().is_some(), "`{}` {id} is in no help group", sub.get_name());
+            }
+        }
     }
 
     #[test]

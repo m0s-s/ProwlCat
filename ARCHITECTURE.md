@@ -35,10 +35,13 @@ Reference: [ripgrep](https://github.com/BurntSushi/ripgrep) demonstrates Rust st
 | `clap` | CLI |
 | `rayon` | parallel file workers |
 | `walkdir` / `glob` | directory traversal |
-| `memmap2` / `memchr` / `bstr` | fast byte scanning |
+| `memmap2` / `memchr` | fast byte scanning |
 | `aho-corasick` | multi-target pre-filter |
 | `regex` / `ipnet` | IP extraction and CIDR |
-| `flate2` / `zstd` / `tar` / `zip` | compressed streams and archives |
+| `flate2` / `zstd` / `bzip2` / `liblzma` / `tar` / `zip` / `sevenz-rust2` | compressed streams and archives |
+| `rusqlite` (SQLite bundled) / `bson` / `serde_json` | databases and dumps read record by record |
+| `bincode` | compact encoding of the temporary files that hold results and records past the memory budget |
+| `rlimit` | raises the open-file limit at start |
 | `serde` / `csv` | export formats |
 | `tantivy` | optional index |
 
@@ -49,7 +52,7 @@ Reference: [ripgrep](https://github.com/BurntSushi/ripgrep) demonstrates Rust st
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      ProwlCat CLI                           │
-│  search │ index │ stats                                     │
+│  search │ index │ stats │ hashid │ tui                      │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
@@ -76,7 +79,7 @@ Reference: [ripgrep](https://github.com/BurntSushi/ripgrep) demonstrates Rust st
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
 │                    Output Layer                             │
-│  Terminal │ JSON │ NDJSON │ CSV                             │
+│  Table │ JSON │ NDJSON │ CSV │ extracted records            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -91,8 +94,13 @@ prowlcat/
 ├── Cargo.toml
 ├── README.md
 ├── ARCHITECTURE.md
+├── CHANGELOG.md
 ├── LICENSE
-├── assets/ascii-art.txt
+├── THIRD-PARTY-NOTICES.md    # licenses of what the binary includes (generated)
+├── deny.toml                 # license policy, checked in CI and on release
+├── assets/screenshots/       # README images, regenerated for every release
+├── scripts/                  # release-check.sh, screenshots.sh, gen-third-party.sh
+├── .github/workflows/        # CI, and Release (verify → build → publish)
 ├── crates/
 │   ├── prowlcat-cli/       # binary `prowlcat`
 │   ├── prowlcat-core/      # orchestration
@@ -103,48 +111,24 @@ prowlcat/
 │   ├── prowlcat-output/    # formatters
 │   ├── prowlcat-index/     # optional Tantivy index
 │   └── prowlcat-tui/       # interactive UI: Night Eyes theme, Fang the mascot
-└── tests/fixtures/         # synthetic test data only
+└── tests/fixtures/         # synthetic test data only (the end-to-end suite builds its own corpus)
 ```
 
 ---
 
 ## 5. CLI
 
-### `prowlcat search`
+Every subcommand is a thin layer over the same crates.
 
-```bash
-prowlcat search [OPTIONS] <TARGETS>...
-prowlcat search [OPTIONS] -f <FILE> -p <PATH>...
-```
+| Command | Does | Exit codes |
+|---------|------|------------|
+| `search` | find targets in files, or in an index (`--index`); `--extract`, `--unique`, `--mask` change what is written | `0` matches, `1` none, `2` error |
+| `index` | build a Tantivy index (§9) | `0`, `2` error |
+| `stats` | count the corpus by kind; `--check` also opens every file and says which ones a search could not read | `0`, `2` error |
+| `hashid` | name the kinds of password hash a string can be (identification only) | `0`, `1` if one is unknown |
+| `tui` | the interactive interface (§9b) | `0`, `2` error |
 
-| Flag | Description |
-|------|-------------|
-| `-p, --path` | File, directory, or glob (repeatable) |
-| `-f, --targets-file` | One target per line (`#` comments ignored) |
-| `-t, --type` | `auto`, `email`, `domain`, `ip`, `cidr`, `text` |
-| `--loose` | Plain-text substring search (alias for `-t text`) |
-| `-r, --recursive` | Recurse directories (default: true) |
-| `-j, --threads` | Worker threads (default: CPU count) |
-| `-m, --max-matches` | Cap matches per target (0 = unlimited) |
-| `-o, --output` | Export to `.json`, `.csv`, `.ndjson` |
-| `--password` | Candidate password for encrypted zip members (repeatable; visible in process list) |
-| `--password-file` | File with one candidate password per line |
-| `--no-progress` | Hide banner |
-
-**Exit codes:** `0` = matches found, `1` = no matches, `2` = error.
-
-### `prowlcat stats`
-
-Corpus statistics without running a search.
-
-### `prowlcat index`
-
-```bash
-prowlcat index -p ./corpus -o ./corpus.idx      # [-r] [-j N] [--password … | --password-file …]
-prowlcat search bob@example.com --index ./corpus.idx
-```
-
-The output directory must not exist or be empty. See §9.
+The complete option reference is the README and `prowlcat <command> --help`. Options that several commands share (`-p`, `-r/--no-recursive`, `-j`, the passwords, `--formats`, `--max-line-bytes`, `--snippet`, `-t/--loose`) are defined once in `prowlcat-cli/src/main.rs` (`Walk`, `Archives`, `Workers`, `Lines`, `Reading`, `Kind`) and grouped in the help by what they do (Input, Matching, Limits and speed, Output, Extraction, Encrypted archives); a unit test checks that each reads and is spelled the same in every command that has it. `-t` and `--format` take fixed sets of values, checked by the parser.
 
 ---
 
@@ -156,7 +140,10 @@ The output directory must not exist or be empty. See §9.
 4. **Bounded memory for results** (`ScanOrchestrator::run_sorted`, `prowlcat-core/src/sorted.rs`). Matches are not kept as `ScanResult`s: each worker hands over compact hits (no repeated path or query text) in batches of about 2 MiB. Once the collector holds more than `result_memory_mb` (256 by default, `PROWLCAT_RESULT_MEM_MB`), it sorts the batch and writes it to an anonymous temporary file, a *run*. Every hit carries a key `(query rank, path rank, line, file index, sequence)` that reproduces the order of the old "collect, then stable sort by query, path, line". Reading back is a k-way merge of the in-memory tail and the runs, so RAM is the budget plus a small buffer per run, whatever the match count; the limit becomes free disk space. A file that fails after handing over part of its hits has them ignored, as a failed file always contributed nothing.
 5. **Streaming output.** The writers in `prowlcat-output` take iterators, so compact JSON, NDJSON, CSV and the table are written one result at a time. The interface keeps the first 250,000 matches for the results screen and the complete `SortedResults` for export. The live view's channel is bounded and drops hits when the screen falls behind; the scan's own counter stays exact.
 
-Not covered yet: a single line with no newline is read whole into memory, and `IndexSearcher::search` still builds its result list in memory.
+6. **Very long lines** (`--max-line-bytes`, `--snippet`; off by default). `prowlcat-decode/src/plain.rs` hands a line longer than the cap over in pieces of at most the cap, each cut after a separator (blank, tab, `,` `;` `(` `)` quotes, `|`, which never occur inside an email, host or IP) and repeating up to 256 bytes of the previous piece, so a match across a cut is found whole; the callback gets `skip`, the number of leading bytes the previous piece already held, and the scan drops a match that lies wholly inside them. Streaming and mmap cut at the same places. `--snippet` only changes what is reported: `scan_entry` takes the window around the match before it copies the line.
+7. **Spill files** (`sorted.rs`). Runs are encoded with bincode and appended to a few shared temporary files (a new one every 1 GiB) so a huge search holds a few dozen descriptors; they go to `PROWLCAT_TMP_DIR`, else the system temp directory unless that is a RAM-backed tmpfs (then `/var/tmp`, then `~/.cache/prowlcat`). If a run cannot be written the scan stops with an error instead of filling memory.
+
+Not covered yet: `IndexSearcher::search` still builds its result list in memory.
 
 ---
 
@@ -166,16 +153,26 @@ Not covered yet: a single line with no newline is read whole into memory, and `I
 
 ---
 
-## 7. Compressed files
+## 7. Compressed files, archives, databases
 
-| Format | Status |
-|--------|--------|
-| `.gz` | yes (`flate2`) |
-| `.zst` | yes (`zstd`, M2) |
-| `.tar`, `.tar.gz`/`.tgz` | yes (`tar`, M2) — each member scanned, reported as `archive_entry` |
-| `.zip` | yes (`zip`, M2) — encrypted (ZipCrypto/AES) members opened with `--password` / `--password-file`; skipped with a warning if no candidate works |
+Detection (`prowlcat-source/src/entry.rs`) is by name first, then by the first bytes, so a file called `dump.bin` is recognised too. `prowlcat-decode` turns every kind into the same thing, lines handed to a callback `(entry, line number, offset, skip, line)`.
 
-Auto-detect via extension, falling back to magic bytes (gzip `1f 8b`, zstd `28 b5 2f fd`, zip `50 4b 03 04`). No decompression to disk.
+| Format | How it is read |
+|--------|----------------|
+| plain text | 8 MiB buffer, or mmap from `mmap_threshold_mb` |
+| `.gz`, `.zst`, `.bz2`, `.xz` | streamed; bzip2 and xz of several streams are read to the end |
+| `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst` | each member is a source, reported as `archive_entry` |
+| `.zip`, `.7z` | each member is a source; encrypted ones are opened with `--password` / `--password-file`, tried in order (a 7z that fails before delivering anything moves on to the next candidate) |
+| `.rar` | **through a program, not a library** (`rar.rs`): see below |
+| SQLite database | read-only; every row of every table is a line (tab-separated values, blobs as hex), the table is the entry |
+| `.bson` | every document is a line of relaxed extended JSON |
+| `.json` that is one array | every element is a line, parsed one at a time (a visitor over `serde_json`'s sequence) |
+
+`--formats text` (`PROWLCAT_FORMATS=text`) maps the last three to plain files. Nothing is decompressed to disk. A source that cannot be opened is a failed file (counted, logged, `warnings: N files failed`), never a silent "no match".
+
+**RAR.** RAR's decoder cannot be included under this project's license, so ProwlCat contains none. It runs 7-Zip (`7zz`, then `7z`, from `PATH`; `PROWLCAT_RAR_TOOL` picks one, and is the only way `unrar` is ever used) as a separate process: it lists the archive, then streams every member in one pass and cuts the stream at the listed sizes, so members keep their names and nothing touches the disk. The program is never run through a shell and the archive path follows `--`; the child is killed if the scan is abandoned. `rar-rs` (BSD-2-Clause, clean-room) was evaluated and not used yet: it decodes a whole member in memory, which would defeat the bounded-memory design.
+
+**`stats --check`** (`prowlcat_decode::probe`) opens each file as its kind says and reads its start: encrypted without a fitting password, a RAR with no program, damaged, or not what its name says. Damage further inside a file is not found.
 
 ---
 
@@ -206,6 +203,17 @@ Auto-detect via extension, falling back to magic bytes (gzip `1f 8b`, zstd `28 b
 2. Valid IP → `Ip`
 3. Contains `@` → `Email`
 4. Otherwise → `Domain`
+
+---
+
+## 8b. Extraction, masking, hash identification
+
+All three work on matches that already exist and never change which lines match.
+
+- `prowlcat-core/src/extract.rs` takes a match and its line and returns `account` and `secret`, only for the layout of combo lists (the account first, then a separator, then the secret). Any other layout (URL records, password first, SQL rows) returns nothing and is counted as skipped, not guessed at.
+- `unique.rs` drops duplicate records (account compared ignoring case, secret exactly, first occurrence kept) with an external sort: sorted runs in temporary files, then a k-way merge, so memory stays near the budget.
+- `mask.rs` replaces what follows a match by `***` (best effort, for `account:secret`); with `--extract` the secret itself is replaced.
+- `hashid.rs` lists what a string can be from its prefix, length and alphabet. It identifies; nothing in ProwlCat decrypts or cracks.
 
 ---
 
@@ -256,12 +264,17 @@ Tantivy-based index (`crates/prowlcat-index`) for repeated queries on the same c
 | M4 | Tantivy index — **done** (`prowlcat index`, `search --index`) |
 | M5 | release binaries, docs — **done** (`.github/workflows`, README, CHANGELOG) |
 | M6 | interactive UI with the Night Eyes theme and the Fang mascot — **done** (`prowlcat`, `prowlcat tui`, `--ui`) |
+| M7 | end-to-end suite, release gate, license policy — **done** (`tests/e2e.rs`, `scripts/release-check.sh`, `deny.toml`) |
+| M8 | bounded memory for huge result sets and very long lines — **done** |
+| M9 | bz2, xz, 7z, rar (via 7-Zip), SQLite, BSON, JSON arrays, `stats --check` — **done** |
+| M10 | `--extract`, `--unique`, `--mask`, `hashid` — **done** |
 
 ---
 
 ## 11. Known limitations (v1)
 
 - No custom regex queries
-- Password-protected archives: encrypted zip only (you supply candidates; no cracking). Encrypted 7z/rar unsupported
+- Password-protected archives: zip, 7z and rar (you supply candidates; no cracking). Encrypted RAR is not covered by tests. SQLCipher databases are not supported
+- `.rar` needs 7-Zip installed; a SQLite database inside an archive is not read as a database
 - UTF-8 primary encoding; Latin-1 best-effort fallback
 - Not a replacement for SQL/analytics databases

@@ -203,7 +203,7 @@ Search for one or more targets. Several targets can be given on the command line
 | `-q, --quiet`, `-v, --verbose` | less or more logging |
 | `--ui <auto\|tui\|cli>` | choose the interface (see above) |
 
-Without `-o` or `--format` the results are printed as a readable table on standard output. With `--format json|ndjson|csv` (or `-o -`) the output is only the data, with no banner in front, so it can be piped:
+Without `-o` or `--format` the results are printed as a readable table on standard output; `--format table -o FILE` writes that same table to a file. With `--format json|ndjson|csv` (or `-o -`) the output is only the data, with no banner in front, so it can be piped:
 
 ```bash
 prowlcat search example.com -t domain -p ./data --format ndjson | jq -r .source.path | sort | uniq -c
@@ -219,11 +219,12 @@ Build a Tantivy index of a corpus. See [Indexing](#indexing).
 | `-o, --output <DIR>` | directory to create the index in (must not exist or be empty) |
 | `-r, --recursive`, `--no-recursive` | as for `search` |
 | `-j, --threads <N>` | parallel worker threads |
+| `--formats <MODE>` | as for `search`: `text` indexes SQLite, BSON and JSON-array files as plain bytes |
 | `--password`, `--password-file` | as for `search` |
 
 ### `prowlcat stats`
 
-Count what is in a corpus, by kind, without searching it.
+Count what is in a corpus, by kind, without searching it. It takes `-p`, `-r/--no-recursive` and `--formats` (with `--formats text`, databases and dumps are counted as plain files), and, for `--check`, `--password` and `--password-file`.
 
 ```console
 $ prowlcat stats -p ./breaches -r
@@ -314,11 +315,13 @@ jq -r '.source.path' hits.ndjson | sort | uniq -c | sort -rn
 
 ### Exit codes
 
-| Code | Meaning |
-|------|---------|
-| `0` | matches found |
-| `1` | no matches |
-| `2` | error |
+| Command | `0` | `1` | `2` |
+|---------|-----|-----|-----|
+| `search` | matches found (with `--extract`: records written) | no matches (or no records) | error |
+| `hashid` | every hash identified | at least one unknown | error |
+| `index`, `stats` | done | | error |
+
+A file that could not be read does not make `search` fail by itself: it is counted (`warnings: N files failed`) and the exit code says only whether something matched. `stats --check` is how to find those files beforehand.
 
 ## What gets matched
 
