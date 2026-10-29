@@ -12,7 +12,8 @@
 
 - **Two interfaces, one engine.** An interactive terminal UI for exploring, and a classic command line that never changes, for scripts and pipelines.
 - **Built for big corpora.** Parallel scanning, streaming decompression, and memory that stays flat however many matches a search finds: results that do not fit in RAM wait on disk.
-- **Every common container.** Reads inside archives without extracting them, including password-protected zips (with passwords you supply).
+- **Every common container.** Reads inside archives without extracting them, including password-protected zip and 7z archives (with passwords you supply), and reads databases and dumps record by record.
+- **Tools for the results.** Pull out `account:secret` pairs, drop the duplicates, hide the secrets, name what kind of password hash a string is, and check beforehand which files a search could not read.
 - **Optional index.** Build a [Tantivy](https://github.com/quickwit-oss/tantivy) index once, then repeat searches almost instantly.
 
 > ProwlCat is a tool for security research, incident response and checking exposure of accounts you are authorised to look into. It searches data you already have on your own machine. Make sure you have the right to hold and search the data you point it at.
@@ -133,7 +134,7 @@ Add `@dir` after a target to search that folder and remember it: `acme.corp @~/b
 
 ### Look and feel
 
-The interface uses the **Night Eyes** theme (amber on black). It adapts to the terminal: truecolor, 256 or 16 colours, `NO_COLOR`, and an ASCII-only mode for non-UTF-8 locales. A terminal that is too short swaps the mascot for a pair of eyes. `PROWLCAT_NO_ANIM=1` holds a still frame instead of animating Fang.
+The interface uses the **Night Eyes** theme (amber on black). It adapts to the terminal: truecolor, 256 or 16 colours, `NO_COLOR`, and an ASCII-only mode for non-UTF-8 locales. A terminal that is too short swaps the mascot for a pair of eyes. `PROWLCAT_NO_ANIM=1` holds a still frame instead of animating Fang, and `prowlcat tui --no-splash` skips the intro.
 
 Pressing `esc` during a scan stops it: files not yet started are skipped and the file being read stops matching within a few hundred lines. A very large single file may still be read to its end in the background.
 
@@ -373,7 +374,7 @@ Rows, documents and elements are read one at a time, so memory does not depend o
 - `--extract` expects the account first. A SQLite row whose first column is the email gives `email:` followed by the other columns, tab-separated, as the secret.
 - `--formats text` (or `PROWLCAT_FORMATS=text`) turns all of this off and searches the plain bytes, which is what a damaged file may need.
 
-**RAR archives.** ProwlCat contains no RAR decoder, so it does not carry that code or its license terms. For `.rar` it runs 7-Zip, installed by you, as a separate program: it lists the archive, then reads every member in one pass and cuts the stream at the listed sizes, so members keep their names and nothing is written to disk. It looks for `7zz` and then `7z` in `PATH`; `PROWLCAT_RAR_TOOL=/path/to/7zz` picks one. Install it with your package manager (`pacman -S 7zip`, `apt install 7zip`, `brew install sevenzip`). Without it, a `.rar` is reported as a failed file and `stats --check` says so. A password goes to 7-Zip on its command line, where other users of the machine can see it for as long as it runs, as with `--password` itself.
+**RAR archives.** ProwlCat contains no RAR decoder, so it does not carry that code or its license terms. For `.rar` it runs 7-Zip, installed by you, as a separate program: it lists the archive, then reads every member in one pass and cuts the stream at the listed sizes, so members keep their names and nothing is written to disk. It looks for `7zz` and then `7z` in `PATH`; `PROWLCAT_RAR_TOOL=/path/to/7zz` picks one. Install it with your package manager (`pacman -S 7zip`, `apt install 7zip` on recent Debian and Ubuntu, `brew install sevenzip`). Without it, a `.rar` is reported as a failed file and `stats --check` says so. A password goes to 7-Zip on its command line, where other users of the machine can see it for as long as it runs, as with `--password` itself.
 
 Matches are always reported in a stable order: by target, then file path, then line number.
 
@@ -512,7 +513,7 @@ How it works, and what to expect:
 - A match is reported with the line number of its line, the byte offset of its **piece**, and, without `--snippet`, the piece as `line_text`. `matched_span` always points inside `line_text`.
 - With `--snippet`, a line that fits in the window is shown unchanged. `…` marks each side where the line goes on, and is counted in `matched_span`.
 - `--snippet` alone shortens the output but still reads the line whole; `--max-line-bytes` is what keeps memory flat. On a 381 MB single-line file, a 700 MB memory limit kills a normal search and lets `--max-line-bytes 64K` finish.
-- In the interactive interface, set `PROWLCAT_MAX_LINE_BYTES` and `PROWLCAT_SNIPPET` before starting it.
+- In the interactive interface, pass the same options to `prowlcat tui` (`--max-line-bytes 1M --snippet 60`), or set `PROWLCAT_MAX_LINE_BYTES` and `PROWLCAT_SNIPPET`.
 
 **`--max-matches`** limits matches per target within each file. It is the quickest way to bound a search whose first results are enough.
 
@@ -556,11 +557,11 @@ cargo clippy --workspace --all-targets -- -D warnings      # CI requires this
 cargo bench -p prowlcat-core --bench scan                  # PROWLCAT_BENCH_MB sets the corpus size
 ```
 
-The workspace is split into small crates: `prowlcat-source` (file enumeration), `prowlcat-decode` (line readers for every container), `prowlcat-match` (the matching engine), `prowlcat-core` (the parallel scan and the bounded result store), `prowlcat-output` (streaming writers), `prowlcat-index` (Tantivy), `prowlcat-tui` (the interface) and `prowlcat-cli` (the `prowlcat` binary). [ARCHITECTURE.md](./ARCHITECTURE.md) explains how they fit together. Changes are listed in [CHANGELOG.md](./CHANGELOG.md).
+The workspace is split into small crates: `prowlcat-types` (the types they share), `prowlcat-source` (file enumeration), `prowlcat-decode` (line readers for every container), `prowlcat-match` (the matching engine), `prowlcat-core` (the parallel scan and the bounded result store), `prowlcat-output` (streaming writers), `prowlcat-index` (Tantivy), `prowlcat-tui` (the interface) and `prowlcat-cli` (the `prowlcat` binary). [ARCHITECTURE.md](./ARCHITECTURE.md) explains how they fit together. Changes are listed in [CHANGELOG.md](./CHANGELOG.md).
 
 ### Tests and releases
 
-`cargo test --workspace` includes an end-to-end suite (`crates/prowlcat-cli/tests/e2e.rs`) that runs the real binary on a generated corpus: every container, every target type, every output format, exit codes, an index against a scan, the memory budget and spill directory, and a golden digest of a fixed corpus. `PROWLCAT_E2E_BIN` points it at another binary, which is how the release workflow tests the packaged one.
+`cargo test --workspace` includes an end-to-end suite (`crates/prowlcat-cli/tests/e2e.rs`) that runs the real binary on a generated corpus: every container, every target type, every output format, exit codes, an index against a scan, the memory budget and spill directory, and a golden digest of a fixed corpus. `PROWLCAT_E2E_BIN` points it at another binary, which is how the release workflow tests the packaged one; `PROWLCAT_E2E_EXPECT_VERSION` also checks what `--version` says, and `PROWLCAT_E2E_RAR_TOOL` names a RAR program for the RAR tests.
 
 The screenshots in this README are regenerated for every release, by running the real interface on a made-up corpus: after bumping the version, `cargo build --release -p prowlcat-cli && scripts/screenshots.sh` (needs `rsvg-convert`; look at the images before committing them). The release gate refuses a version whose screenshots are older.
 
