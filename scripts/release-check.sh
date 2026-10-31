@@ -24,6 +24,10 @@ step "README screenshots"
 shot=$(cat assets/screenshots/VERSION 2>/dev/null || echo none)
 [ "$shot" = "$version" ] && ok "screenshots were made with $shot" || bad "screenshots are for $shot, not $version (run: cargo build --release -p prowlcat-cli && scripts/screenshots.sh, then look at them and commit)"
 
+step "README animations"
+gif=$(cat assets/gifs/VERSION 2>/dev/null || echo none)
+[ "$gif" = "$version" ] && ok "animations were made with $gif" || bad "animations are for $gif, not $version (run: cargo build --release -p prowlcat-cli && scripts/gifs.sh, then look at them and commit)"
+
 step "working tree"
 [ -z "$(git status --porcelain --untracked-files=no)" ] && ok "no uncommitted changes to tracked files" || bad "uncommitted changes (commit them first)"
 git fetch -q origin 2>/dev/null

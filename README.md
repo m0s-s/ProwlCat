@@ -7,7 +7,7 @@
 **A local-first search engine for breach corpora.** Point it at a folder of dumps (plain text, `.gz`, `.bz2`, `.xz`, `.zst`, `.zip`, `.7z`, `.rar`, `.tar` and its compressed forms, and SQLite, BSON and JSON-array dumps) and find emails, domains, IP addresses, CIDR ranges or plain text in seconds, with no server, no upload and no external API. Written in Rust.
 
 <p align="center">
-  <img src="assets/screenshots/tui-home.png" alt="ProwlCat interactive interface: the home screen with Fang, the mascot" width="860">
+  <img src="assets/gifs/tour.gif" alt="ProwlCat in action: type a target, watch the scan, walk the results and open the cheat sheet" width="860">
 </p>
 
 - **Two interfaces, one engine.** An interactive terminal UI for exploring, and a classic command line that never changes, for scripts and pipelines.
@@ -84,7 +84,7 @@ prowlcat tui acme.corp -p ~/breaches   # same, and start searching right away
 ```
 
 <p align="center">
-  <img src="assets/screenshots/tui-results.png" alt="The results explorer: files on the left, matching lines on the right with the match highlighted" width="860">
+  <img src="assets/gifs/results.gif" alt="The results explorer: files on the left, matching lines on the right with the match highlighted" width="860">
 </p>
 
 The explorer lists the files that matched, sorted by number of hits, and the matching lines of the selected file, with the matched part highlighted. A panel underneath shows where the line came from (file, line, byte offset).
@@ -94,7 +94,7 @@ The explorer lists the files that matched, sorted by number of hits, and the mat
 Type `/` at the prompt to see the commands. `up` and `down` move through the list, `tab` completes.
 
 <p align="center">
-  <img src="assets/screenshots/tui-commands.png" alt="The command list opened with /" width="860">
+  <img src="assets/gifs/commands.gif" alt="The command list opened with /, narrowed as you type" width="860">
 </p>
 
 | Command | Does |
@@ -563,7 +563,7 @@ The workspace is split into small crates: `prowlcat-types` (the types they share
 
 `cargo test --workspace` includes an end-to-end suite (`crates/prowlcat-cli/tests/e2e.rs`) that runs the real binary on a generated corpus: every container, every target type, every output format, exit codes, an index against a scan, the memory budget and spill directory, and a golden digest of a fixed corpus. `PROWLCAT_E2E_BIN` points it at another binary, which is how the release workflow tests the packaged one; `PROWLCAT_E2E_EXPECT_VERSION` also checks what `--version` says, and `PROWLCAT_E2E_RAR_TOOL` names a RAR program for the RAR tests.
 
-The screenshots in this README are regenerated for every release, by running the real interface on a made-up corpus: after bumping the version, `cargo build --release -p prowlcat-cli && scripts/screenshots.sh` (needs `rsvg-convert`; look at the images before committing them). The release gate refuses a version whose screenshots are older.
+The animations and screenshots in this README are regenerated for every release, by running the real interface on a made-up corpus: after bumping the version, `cargo build --release -p prowlcat-cli && scripts/gifs.sh && scripts/screenshots.sh` (needs `rsvg-convert` and `ffmpeg`; look at the images before committing them). The release gate refuses a version whose animations or screenshots are older.
 
 Before tagging a release, run the full gate and fix whatever it reports:
 
